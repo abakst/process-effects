@@ -3,7 +3,8 @@ module PostPlugin
     ) where
 
 import Debug.Trace
-import Data.List  
+import Data.Maybe
+import Data.List as L
 import Data.Map.Strict as M
 import Data.HashMap.Strict as H
 import Control.Monad.Reader
@@ -51,6 +52,7 @@ data EffState = EffState {
   , annots :: H.HashMap SrcSpan [SpecType]
   , annenv :: AnnEnv
   , tyconEmb :: TCEmb TyCon
+  , tsubst :: [(Symbol, EffTy)]
   , esubst :: [(Symbol, Effect)]
   }
 
@@ -127,24 +129,14 @@ freshChans (EffTerm e)
 freshChans e = return e
 
 printEffTerm = render . pretty
--- printEffTerm :: Effect -> String
--- printEffTerm (EffLit s)        = s
--- printEffTerm (AbsEff (Src x) e2)  = printf "λ↑%s.(%s)" (symbolString x) (printEffTerm e2)
--- printEffTerm (AbsEff (Eff x) e2)  = printf "(λ%s.(%s))" (symbolString x) (printEffTerm e2)
--- printEffTerm (AppEff e1 e2) = printf "(%s %s)" (printEffTerm e1) (printEffTerm e2)
--- printEffTerm (EffVar (Src s)) = printf "↑%s"  (symbolString s)
--- printEffTerm (EffVar (Eff s)) = symbolString s
--- printEffTerm (Bind e1 e2)
---   = printf "%s >>= %s" (printEffTerm e1) (printEffTerm e2)
--- printEffTerm (Dummy s)      = s
--- printEffTerm (Pend e (s,(x,t)))
---   = printf "%s" (printEffTerm e)
--- printEffTerm (Par e1 e2)
---   = printf "(%s | %s)" (printEffTerm e1) (printEffTerm e2)
 
 printEff :: EffTy -> String
+printEff (ETyVar s)
+  = symbolString s
+printEff (EForAll s t)
+  = printf "∀%s. %s" (symbolString s) (printEff t)
 printEff (EPi s e1 e2)
-  = printf "(%s:%s -> %s)" (symbolString s) (printEff e1) (printEff e2)
+  = printf "(Π%s:%s. %s)" (symbolString s) (printEff e1) (printEff e2)
 printEff (ETyApp e1 e2)
   = printf "(%s %s)" (printEff e1) (printEff e2)
 printEff (ETermAbs s e)
@@ -155,24 +147,6 @@ printEff (EffTerm t)
 kont = Eff (symbol "$K")
 me   = Src (symbol "me")
 noEff = EffLit "0"
--- spawnEffectTy
---   = ETermAbs e (EPi x (EffTerm (EffVar (Eff e)))
---                       (EffTerm (AbsEff kont
---                                        (Par (AppEff (EffVar (Eff e)) (EffLit "done"))
---                                             (AppEff (EffVar kont) (EffVar (Src (symbol "peee"))))))))
---   where
---     e = symbol "e"
---     x = symbol "x"
--- recvEffectTy = EffTerm (AbsEff kont (Bind (EffLit "recv") (EffVar kont)))
--- sendEffectTy = EPi pSym (EffTerm noEff)
---              $ EPi mSym (EffTerm noEff)
---              $  EffTerm (AbsEff kont
---                            (Bind (AppEff (AppEff (EffLit "send") (EffVar (Src pSym)))
---                                            (EffVar (Src mSym)))
---                                  (EffVar kont)))
---   where
---     pSym = symbol "p"
---     mSym = symbol "m"
 bindEffectTy = ETermAbs e0Sym
              $ ETermAbs e1Sym
              $ EPi actSym (EffTerm (EffVar (Eff e0Sym)))
@@ -194,6 +168,21 @@ bindEffectTy = ETermAbs e0Sym
     e1Sym = symbol "e1"
     xSym = symbol "x"
 
+thenEffectTy = ETermAbs e0Sym
+             $ ETermAbs e1Sym
+             $ EPi fSym (EffTerm (EffVar (Eff e0Sym)))
+             $ EPi gSym (EffTerm (AbsEff kont (AbsEff me (EffVar (Eff e1Sym)))))
+             $ EffTerm (AbsEff kont
+                          (AbsEff me
+                             (AppEff (AppEff (EffVar (Eff e0Sym))
+                                              (AbsEff (Src (symbol "_")) (EffVar (Eff e1Sym))))
+                              (EffVar me))))
+  where
+    fSym = symbol "f"
+    gSym = symbol "g"
+    e0Sym = symbol "e0"
+    e1Sym = symbol "e1"
+
 withCC = ETermAbs (symbol "K")           
 
 doEffects :: AnnInfo SpecType -> ReaderT PluginEnv IO ()
@@ -209,6 +198,7 @@ doEffects (AI m)
                                                          , annenv = annenv
                                                          , tyconEmb = emb
                                                          , esubst = []
+                                                         , tsubst = []
                                                          }
   where
     m' = (snd <$>) <$> m
@@ -229,8 +219,8 @@ synthEffects :: EffEnv -> [CoreBind] -> StateT (EffState) IO ()
 synthEffects g []
   = return ()
 synthEffects g (cb:cbs)
-  = do synth1Effect g cb
-       synthEffects g cbs
+  = do g' <- synth1Effect g cb
+       synthEffects g' cbs
 
 synth1Effect :: EffEnv -> CoreBind -> StateT (EffState) IO EffEnv 
 synth1Effect g (NonRec b e)
@@ -243,14 +233,41 @@ lookupEff g e@(Var x)
   = case M.lookup (getName x) g of
       Nothing -> do
         let t = CoreUtils.exprType e
-        liftIO (putStrLn "default")
         defaultEff (CoreUtils.exprType e)
       Just e  -> return e
 
+bkFun :: Type -> Maybe ([TyVar], [Type], Type)
+bkFun t
+  = if Type.isFunTy tfun then Just (tvs, targs', tout) else Nothing
+  where
+    (tvs, tfun)   = splitForAllTys t
+    (targs, tout) = splitFunTys tfun
+    targs'        = [ t | t <- targs, not (isDictLikeTy t) ]
+
+walkTyVars f t
+  | isTyVarTy t
+    = f (fromJust (getTyVar_maybe t))
+  | otherwise 
+    = case bkFun t of
+        Just (tvs, ts, tout) ->
+          let ets  = walkTyVars f <$> (ts ++ [tout])
+          in L.foldr1 (EPi (symbol "_")) ets 
+        Nothing ->
+          EffTerm noEff
+                 
+defaultEff :: Type -> StateT EffState IO EffTy
 defaultEff t
-  | Type.isForAllTy t = do
-    liftIO (putStrLn "FORALL")
-    return (EffTerm noEff)
+  | isJust (bkFun t)
+  = do is <- mapM (const freshInt) tvs
+       let evs    = zip tvs (sym <$> is)
+           sym    = symbol . ("E" ++) . show
+           ets    = walkTyVars (go evs) <$> (targs ++ [tout])
+           funTy  = L.foldr1 (EPi (symbol "_")) ets
+       return funTy
+  where
+    Just (tvs, targs, tout) = bkFun t
+    go evs tv = maybe (EffTerm noEff) ETyVar $ L.lookup tv evs
+defaultEff t
   | Type.isFunTy t
   = case splitFunTy_maybe t of
       Just (tin, tout) -> do
@@ -286,6 +303,9 @@ synthEff g (App e@(Var f) (Type x))
       | isEffect &&
         getName f == bindMName
       = return $ bindEffectTy
+      | isEffect &&
+        getName f == thenMName
+      = return $ thenEffectTy
       | otherwise
       = synthEff g e
 synthEff g (App e (Type x))
@@ -308,42 +328,48 @@ synthEff g (App eFun eArg)
   = do funEff                     <- synthEff g eFun
        funEffFresh                <- freshFnEff funEff
        let EPi s freshIn freshOut = funEffFresh
+       liftIO (putStrLn (printEff funEffFresh))
        argEff                     <- synthEff g eArg
-       u                          <- gets esubst
+       tu                         <- gets tsubst
+       eu                         <- gets esubst
        tyArg                      <- lookupSpecType eArg
-       (u', tyIn) <- unifyTermTys u argEff (maybeSubArg s tyArg freshIn)
-       modify $ \s -> s { esubst = u' }
-       return (maybeSubArg s tyArg (sub u' freshOut))
+       (tu', eu', tyIn)           <- unifyTermTys tu eu argEff (maybeSubArg s tyArg freshIn)
+       modify $ \s -> s { esubst = eu', tsubst = tu' }
+       return (maybeSubArg s tyArg (sub tu' (sub eu' freshOut)))
   where
     maybeSubArg :: Symbol -> SpecType -> EffTy -> EffTy
     maybeSubArg s t e
       = maybe e (\v -> sub [(s, Info (v,t))] e) $ maybeExtractVar eArg
-    maybeExtractVar (Var v)     = Just v
+    maybeExtractVar (Var v)     = Just (symbol v)
     maybeExtractVar (Tick tt e) = maybeExtractVar e
     maybeExtractVar _           = Nothing
 
-unifyTermTys su (EffTerm t1) (EffTerm t2)
-  = return $ EffTerm <$> (unifyTerms su t1 t2)
-unifyTermTys su f@(EPi s t1 t2) (EPi s' t1' t2')
-  = do v <- freshTermVar
-       -- let t10 = subArg (v, s') (subArg (s, v) t1)
-       --     t20 = subArg (v, s') (subArg (s, v) t2)
-       (su1, tyIn)  <- unifyTermTys su (sub [(s,v)] t1) (sub [(s',v)] t1')
-       (su2, tyOut)  <- unifyTermTys su1 (sub [(s,v)] t2) (sub [(s',v)] t2')
-       -- (su2, tyOut) <- unifyTermTys su1 (sub su1 t2) (sub su1 t2')
-       return (su2, EPi v tyIn tyOut)
-unifyTermTys su (ETermAbs s t) (ETermAbs s' t')
+unifyTermTys tSub eSub (ETyVar t) t'
+  | t `notElem` dom tSub
+  = return (tSub `catSubst` [(t, t')], eSub, t')
+unifyTermTys tSub eSub t' (ETyVar t)
+  | t `notElem` dom tSub
+  = return (tSub `catSubst` [(t, t')], eSub, t')
+unifyTermTys tSub eSub (EffTerm t1) (EffTerm t2)
+  = do let (eSub', t) = unifyTerms eSub t1 t2
+       return (tSub, eSub', EffTerm t)
+unifyTermTys tSub eSub f@(EPi s t1 t2) (EPi s' t1' t2')
+  = do v                     <- freshTermVar
+       (tSub1, eSub1, tyIn)  <- unifyTermTys tSub eSub (sub [(s,v)] t1) (sub [(s',v)] t1')
+       (tSub2, eSub2, tyOut) <- unifyTermTys tSub1 eSub1 (sub [(s,v)] t2) (sub [(s',v)] t2')
+       return (tSub2, eSub2, EPi v tyIn tyOut)
+unifyTermTys tSub eSub (ETermAbs s t) (ETermAbs s' t')
+  = do e         <- freshEffVar
+       let inst  = [(s, EffVar (Eff e))]
+       (tSub, eSub, t'') <- unifyTermTys tSub eSub (sub inst t) (sub inst t')
+       return (tSub, eSub, ETermAbs e t'')
+unifyTermTys tSub eSub t@(ETermAbs _ _) t'
   = do e <- freshEffVar
-       let inst = [(s, EffVar (Eff e))]
-       (su, t'') <- unifyTermTys su (sub inst t) (sub inst t')
-       return (su, ETermAbs e t'')
-unifyTermTys su t@(ETermAbs _ _) t'
+       unifyTermTys tSub eSub t (ETermAbs e t')
+unifyTermTys tSub eSub t t'@(ETermAbs _ _)
   = do e <- freshEffVar
-       unifyTermTys su t (ETermAbs e t')
-unifyTermTys su t t'@(ETermAbs _ _)
-  = do e <- freshEffVar
-       unifyTermTys su (ETermAbs e t) t'
-unifyTermTys sub t1 t2
+       unifyTermTys tSub eSub (ETermAbs e t) t'
+unifyTermTys _ _ t1 t2
   = error oops  -- (printEff t1) (printEff t2))
   where
     oops :: String
@@ -404,8 +430,8 @@ printTy msg t
 
 lookupSpecType :: CoreExpr -> StateT EffState IO SpecType
 lookupSpecType e@(Var x)
-  -- = lookupType (getSrcSpan x) e
-  = ((flip meet (uTop $ exprReft (symbol x))) <$>) <$> lookupType (getSrcSpan x) e
+  = lookupType (getSrcSpan x) e
+  -- = ((flip meet (uTop $ exprReft (symbol x))) <$>) <$> lookupType (getSrcSpan x) e
 lookupSpecType (Tick tt e@(Var x))
   = lookupType (getSrcSpan x) e 
 lookupSpecType (Tick tt e)

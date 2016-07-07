@@ -2,7 +2,8 @@ module PrettyPrint where
 
 import           EffectTypes
 import           Text.PrettyPrint.HughesPJ
-import           Language.Fixpoint.Types hiding (PPrint(..))
+import qualified Language.Fixpoint.Types as Fp
+import qualified Language.Haskell.Liquid.Types as Rt
 
 class Pretty a where
   pprintPrec :: Int -> a -> Doc
@@ -19,7 +20,7 @@ pretty = pprintPrec 0
 instance Pretty Binder where
   pprintPrec z b = pprintPrec z (symbol b)
 
-instance Pretty Symbol where
+instance Pretty Fp.Symbol where
   pprintPrec _ s = text (symbolString s)
 
 instance Pretty Effect where
@@ -27,8 +28,17 @@ instance Pretty Effect where
     = text s
   pprintPrec z (EffVar v)
     = text (symbolString (symbol v))
-  pprintPrec z (Pend e _)
-    = pprintPrec z e
+  pprintPrec z (Pend e (x,t))
+    = pprintPrec z e <+>
+        if not $ Fp.isTautoPred p then
+          parens (
+                  text "where" <+> 
+                       Fp.pprint (Fp.subst1 p (vv, Fp.expr (symbol x)))
+                 )
+        else
+          empty
+    where
+      Fp.Reft (vv, p) = Rt.rTypeReft t
   pprintPrec z (Dummy s)
     = text s
   pprintPrec z (AppEff e1 e2)

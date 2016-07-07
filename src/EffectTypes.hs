@@ -30,7 +30,7 @@ data Effect = EffLit String
             | Dummy String
             | Nu Symbol Effect
             | Par Effect Effect
-            | Pend Effect (Symbol, (Id, SpecType))
+            | Pend Effect (Symbol, SpecType)
               deriving Show
 
 data EffTy  = EPi Symbol EffTy EffTy 
@@ -67,42 +67,47 @@ instance EffectSubst a (Symbol, a) where
 instance EffectSubst a b => EffectSubst a [b] where
   sub su = (sub su <$>)
 
+constInfo su i = i           
 instance EffectSubst Symbol EffTy where
-  sub = genericSubstTy (\_ s -> ETyVar s) go
+  sub = genericSubstTy (const ETyVar) go goInfo
     where
-      go (Src _) s = EffVar (Src s)
-      go (Eff _) s = EffVar (Eff s)
+      go (Src _) s        = EffVar (Src s)
+      go (Eff _) s        = EffVar (Eff s)
+      goInfo su (x,t)
+        = withMatch su x (x,t) (\_ s' -> (s',t))
 
 instance EffectSubst Symbol Effect where
-  sub = genericSubst go
+  sub = genericSubst go constInfo
     where
       go (Src _) s = EffVar (Src s)
       go (Eff _) s = EffVar (Eff s)
 
 instance EffectSubst Effect EffTy where         
-  sub = genericSubstTy (\s _ -> ETyVar s) go
+  sub = genericSubstTy (\s _ -> ETyVar s) go constInfo
     where
       go b@(Src _) _ = EffVar b
       go (Eff _) e   = e
 
 instance EffectSubst Effect Effect where         
-  sub = genericSubst go
+  sub = genericSubst go constInfo
     where
       go b@(Src _) _ = EffVar b
       go (Eff _) e   = e
 
 instance EffectSubst EffTy EffTy where         
-  sub = genericSubstTy (\_ e -> e) (\s _ -> EffVar s)
+  sub = genericSubstTy (\x y -> y) (\s _ -> EffVar s) constInfo
 
-newtype Info = Info (Id, SpecType)      
+newtype Info = Info (Symbol, SpecType)      
 instance EffectSubst Info EffTy where
   sub
-    = genericSubstTy (\v _ -> ETyVar v) go 
+    = genericSubstTy (\v _ -> ETyVar v) go goInfo
     where
+      goInfo su (x,t)
+        = withMatch su x (x,t) (\_ (Info (x',t')) -> (x',t))
       go b@(Eff _) _
         = EffVar b
       go b@(Src _) (Info (i, t))
-        = Pend (EffVar (Src (symbol i))) (symbol b, (i, t))
+        = Pend (EffVar (Src (symbol i))) (i, t)
 
 dom :: [(Symbol, a)] -> [Symbol]
 dom = (fst <$>)
@@ -116,7 +121,7 @@ withMatch su x y f
       Just e  -> f x e
       Nothing -> y
 
-genericSubstTy f g = go
+genericSubstTy f g h = go
   where
     go su t@(ETyVar s)
       = withMatch su s t f
@@ -127,9 +132,9 @@ genericSubstTy f g = go
     go su t@(ETermAbs s et)
       = ETermAbs s (go (restrict su s) et)
     go su t@(EffTerm e)
-      = EffTerm (genericSubst g su e)
+      = EffTerm (genericSubst g h su e)
 
-genericSubst g = goTerm
+genericSubst g h = goTerm
   where
     goTerm su e@(EffVar s)
       = withMatch su s e g
@@ -146,4 +151,4 @@ genericSubst g = goTerm
     goTerm su (Par p q)
       = Par (goTerm su p) (goTerm su q)
     goTerm su (Pend e i)
-      = Pend (goTerm su e) i
+      = Pend (goTerm su e) (h su i)
