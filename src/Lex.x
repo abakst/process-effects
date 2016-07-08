@@ -34,6 +34,7 @@ tokens :-
   ">>="    { \s -> TokenBind }
   $alpha [$alpha $digit \_ \']* { \s -> TokenSym s }
   "$" [$alpha $digit \_ \']* { \s -> TokenDSym s }
+  0       { \s -> TokenZero }
 
 {
 data Token = TokenLBrack
@@ -51,6 +52,7 @@ data Token = TokenLBrack
            | TokenPar
            | TokenSym String
            | TokenDSym String
+           | TokenZero
            deriving (Eq,Show)
 
 scanTokens :: String -> Except String [Token]

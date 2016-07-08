@@ -11,6 +11,8 @@ module EffectTypes ( Binder(..)
                    , catSubst
                    ) where
 
+import Debug.Trace
+
 import Var
 import Data.Function
 import Data.List
@@ -18,6 +20,7 @@ import Language.Haskell.Liquid.Types
 import Language.Haskell.Liquid.Types.RefType
 import Language.Fixpoint.Types hiding (SrcSpan(..), ECon, filterSubst, catSubst) 
   
+debug s x = trace (s ++ ": " ++ show x) x  
 data Binder = Src Symbol
             | Eff Symbol
               deriving (Eq, Show)
@@ -27,11 +30,14 @@ data Effect = EffLit String
             | AbsEff Binder Effect
             | EffVar Binder
             | Bind Effect Effect
-            | Dummy String
+            | NonDet [Effect]
             | Nu Symbol Effect
             | Par Effect Effect
+            | Assume Symbol (Symbol, [Symbol]) Effect
             | Pend Effect (Symbol, SpecType)
               deriving Show
+
+data Assm                        
 
 data EffTy  = EPi Symbol EffTy EffTy 
             | EForAll Symbol EffTy
@@ -39,6 +45,7 @@ data EffTy  = EPi Symbol EffTy EffTy
             | ETermAbs Symbol EffTy
             | ETyApp EffTy EffTy
             | EffTerm Effect
+            | EffNone
               deriving Show
 
 instance Symbolic Binder where
@@ -67,42 +74,47 @@ instance EffectSubst a (Symbol, a) where
 instance EffectSubst a b => EffectSubst a [b] where
   sub su = (sub su <$>)
 
-constInfo su i = i           
 instance EffectSubst Symbol EffTy where
-  sub = genericSubstTy (const ETyVar) go goInfo
-    where
-      go (Src _) s        = EffVar (Src s)
-      go (Eff _) s        = EffVar (Eff s)
-      goInfo su (x,t)
-        = withMatch su x (x,t) (\_ s' -> (s',t))
-
-instance EffectSubst Symbol Effect where
-  sub = genericSubst go constInfo
+  sub su = genericSubstTy (const ETyVar) go goInfo su
     where
       go (Src _) s = EffVar (Src s)
       go (Eff _) s = EffVar (Eff s)
+      goInfo (x,t)
+        = withMatch su x (x, fixSubst su <$> t) (\_ s' -> (s', fixSubst su t))
+
+fixSubst :: Subable a => [(Symbol,Symbol)] -> a -> a
+fixSubst su
+  = subst (mkSubst ((expr <$>) <$> su))
+
+instance EffectSubst Symbol Effect where
+  sub su = genericSubst go id su
+    where
+      go (Src _) s = EffVar (Src s)
+      go (Eff _) s = EffVar (Eff s)
+      -- goInfo (x,t)
+      --   = withMatch su x (x,t) (\_ s' -> (s',t))
 
 instance EffectSubst Effect EffTy where         
-  sub = genericSubstTy (\s _ -> ETyVar s) go constInfo
+  sub = genericSubstTy (\s _ -> ETyVar s) go id
     where
       go b@(Src _) _ = EffVar b
       go (Eff _) e   = e
 
 instance EffectSubst Effect Effect where         
-  sub = genericSubst go constInfo
+  sub = genericSubst go id
     where
       go b@(Src _) _ = EffVar b
       go (Eff _) e   = e
 
 instance EffectSubst EffTy EffTy where         
-  sub = genericSubstTy (\x y -> y) (\s _ -> EffVar s) constInfo
+  sub = genericSubstTy (\x y -> y) (\s _ -> EffVar s) id
 
 newtype Info = Info (Symbol, SpecType)      
 instance EffectSubst Info EffTy where
-  sub
-    = genericSubstTy (\v _ -> ETyVar v) go goInfo
+  sub su
+    = genericSubstTy (\v _ -> ETyVar v) go goInfo su
     where
-      goInfo su (x,t)
+      goInfo (x,t)
         = withMatch su x (x,t) (\_ (Info (x',t')) -> (x',t))
       go b@(Eff _) _
         = EffVar b
@@ -123,6 +135,8 @@ withMatch su x y f
 
 genericSubstTy f g h = go
   where
+    go _ EffNone
+      = EffNone
     go su t@(ETyVar s)
       = withMatch su s t f
     go su t@(EPi s et1 et2)
@@ -134,12 +148,19 @@ genericSubstTy f g h = go
     go su t@(EffTerm e)
       = EffTerm (genericSubst g h su e)
 
+genericSubst :: (Binder -> b -> Effect)
+             -> ((Symbol, SpecType) -> (Symbol, SpecType))
+             -> [(Symbol, b)]
+             -> Effect
+             -> Effect
 genericSubst g h = goTerm
   where
     goTerm su e@(EffVar s)
       = withMatch su s e g
     goTerm su e@(EffLit _)
       = e
+    goTerm su (NonDet es)
+      = NonDet (goTerm su <$> es)
     goTerm su (AppEff m n)
       = AppEff (goTerm su m) (goTerm su n)
     goTerm su (AbsEff s m)
@@ -150,5 +171,7 @@ genericSubst g h = goTerm
       = Bind (goTerm su m) (goTerm su g)
     goTerm su (Par p q)
       = Par (goTerm su p) (goTerm su q)
+    goTerm su (Assume s (c, bs) e)
+      = Assume s (c, bs) (goTerm su e)
     goTerm su (Pend e i)
-      = Pend (goTerm su e) (h su i)
+      = Pend (goTerm su e) (h i)

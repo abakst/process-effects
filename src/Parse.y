@@ -25,6 +25,7 @@ import Control.Monad.Except
   '\\' { TokenBackSlash }
   'forall' { TokenForAll }
   '>>=' { TokenBind }
+  '0'  { TokenZero }
   VAR  { TokenSym   $$ }
   EVAR { TokenDSym  $$ }
 
@@ -32,6 +33,7 @@ import Control.Monad.Except
 %%
 
 effty : '{' '}'                   { EffTerm (EffLit "0") } 
+      | '0'                       { EffNone }
       | '{' effTerm '}'           { EffTerm $2 }
       | '(' effty ')'             { $2 }
       | VAR ':' effty '->' effty  { EPi (symbol $1)  $3 $5 }

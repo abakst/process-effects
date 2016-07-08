@@ -1,7 +1,7 @@
 module PrettyPrint where
 
 import           EffectTypes
-import           Text.PrettyPrint.HughesPJ
+import           Text.PrettyPrint.HughesPJ hiding ((<$>))
 import qualified Language.Fixpoint.Types as Fp
 import qualified Language.Haskell.Liquid.Types as Rt
 
@@ -33,14 +33,26 @@ instance Pretty Effect where
         if not $ Fp.isTautoPred p then
           parens (
                   text "where" <+> 
+                       -- Fp.pprint (symbol x) <+> colon <+> Fp.pprint p
                        Fp.pprint (Fp.subst1 p (vv, Fp.expr (symbol x)))
+                       -- Fp.pprint (Fp.subst1 p (vv, Fp.expr (symbol x)))
                  )
         else
           empty
     where
       Fp.Reft (vv, p) = Rt.rTypeReft t
-  pprintPrec z (Dummy s)
-    = text s
+  pprintPrec z (NonDet es)
+    = parensIf (z > za) $
+      hcat (punctuate (text " □ ") (pprintPrec (za+1) <$> es))
+    where
+      za = 2
+  pprintPrec z (Assume s (c,bs) e)
+    = parensIf (z > za) $
+      text "case" <+> pprintPrec 0 s <+> text "of" <+>
+           parens (pprintPrec 0 c <+> hsep (pprintPrec 0 <$> bs)) <+> text "->"
+      <+> pprintPrec (za+1) e 
+    where
+      za = 2
   pprintPrec z (AppEff e1 e2)
     = parensIf (z > za) $
       pprintPrec za e1 <+> pprintPrec (za+1) e2
