@@ -5,6 +5,8 @@ module EffectTypes ( Binder(..)
                    , EffTy(..)
                    , EffectSubst(..)
                    , Info(..)
+                   , freeEffTyVars
+                   , freeEffTermVars
                    , symbolString
                    , symbol
                    , dom
@@ -37,8 +39,6 @@ data Effect = EffLit String
             | Pend Effect (Symbol, SpecType)
               deriving Show
 
-data Assm                        
-
 data EffTy  = EPi Symbol EffTy EffTy 
             | EForAll Symbol EffTy
             | ETyVar Symbol
@@ -47,6 +47,50 @@ data EffTy  = EPi Symbol EffTy EffTy
             | EffTerm Effect
             | EffNone
               deriving Show
+
+-- SO BAD, PLEASE REFACTOR ME!!!
+freeEffTyVars :: EffTy -> [Symbol]                       
+freeEffTyVars (EPi s t1 t2)
+  = collect freeEffTyVars t1 t2
+freeEffTyVars (EForAll s t)
+  = freeEffTyVars t \\ [s]
+freeEffTyVars (ETyVar s)
+  = [s]
+freeEffTyVars (ETermAbs s t)
+  = freeEffTyVars t
+freeEffTyVars (ETyApp t1 t2)
+  = collect freeEffTyVars t1 t2
+freeEffTyVars _
+  = []
+
+collect f x y
+  = nub (f x ++ f y)
+
+freeEffTermVars :: EffTy -> [Symbol]    
+freeEffTermVars (EffTerm e)
+  = go e
+  where
+    go (AppEff e1 e2)      = collect go e1 e2 
+    go (AbsEff (Src _) e2) = go e2
+    go (AbsEff (Eff x) e2) = go e2 \\ [x]
+    go (Bind e1 e2)        = collect go e1 e2
+    go (NonDet es)         = nub (concatMap go es)
+    go (Nu s e)            = go e
+    go (Par e1 e2)         = collect go e1 e2
+    go (Assume _ _ e)      = go e
+    go (Pend e _)          = go e
+    go (EffVar (Eff x))    = [x]
+    go _                   = []
+freeEffTermVars (EPi s t1 t2)
+  = collect freeEffTermVars t1 t2
+freeEffTermVars (EForAll s t)
+  = freeEffTermVars t
+freeEffTermVars (ETermAbs s t)
+  = freeEffTermVars t \\ [s]
+freeEffTermVars (ETyApp t t')
+  = collect freeEffTermVars t t'
+freeEffTermVars _ = []
+                
 
 instance Symbolic Binder where
   symbol (Src x) = x
@@ -75,7 +119,7 @@ instance EffectSubst a b => EffectSubst a [b] where
   sub su = (sub su <$>)
 
 instance EffectSubst Symbol EffTy where
-  sub su = genericSubstTy (const ETyVar) go goInfo su
+  sub su = genericSubstTy (const ETyVar) go goInfo (fixSubst su) su
     where
       go (Src _) s = EffVar (Src s)
       go (Eff _) s = EffVar (Eff s)
@@ -87,33 +131,37 @@ fixSubst su
   = subst (mkSubst ((expr <$>) <$> su))
 
 instance EffectSubst Symbol Effect where
-  sub su = genericSubst go id su
+  sub su = genericSubst go (fixSubst su) goInfo su
     where
       go (Src _) s = EffVar (Src s)
       go (Eff _) s = EffVar (Eff s)
+      goInfo (x,t)
+        = withMatch su x (x, fixSubst su <$> t) (\_ s' -> (s', fixSubst su t))
       -- goInfo (x,t)
       --   = withMatch su x (x,t) (\_ s' -> (s',t))
 
 instance EffectSubst Effect EffTy where         
-  sub = genericSubstTy (\s _ -> ETyVar s) go id
+  sub = genericSubstTy (\s _ -> ETyVar s) go id id
     where
       go b@(Src _) _ = EffVar b
       go (Eff _) e   = e
 
 instance EffectSubst Effect Effect where         
-  sub = genericSubst go id
+  sub = genericSubst go id id
     where
       go b@(Src _) _ = EffVar b
       go (Eff _) e   = e
 
 instance EffectSubst EffTy EffTy where         
-  sub = genericSubstTy (\x y -> y) (\s _ -> EffVar s) id
+  sub = genericSubstTy (\x y -> y) (\s _ -> EffVar s) id id
 
 newtype Info = Info (Symbol, SpecType)      
 instance EffectSubst Info EffTy where
   sub su
-    = genericSubstTy (\v _ -> ETyVar v) go goInfo su
+    = genericSubstTy (\v _ -> ETyVar v) go goInfo goCase su
     where
+      goCase x
+        = withMatch su x x (\_ (Info (x',_)) -> x')
       goInfo (x,t)
         = withMatch su x (x,t) (\_ (Info (x',t')) -> (x',t))
       go b@(Eff _) _
@@ -133,7 +181,7 @@ withMatch su x y f
       Just e  -> f x e
       Nothing -> y
 
-genericSubstTy f g h = go
+genericSubstTy f g h cf = go
   where
     go _ EffNone
       = EffNone
@@ -146,17 +194,18 @@ genericSubstTy f g h = go
     go su t@(ETermAbs s et)
       = ETermAbs s (go (restrict su s) et)
     go su t@(EffTerm e)
-      = EffTerm (genericSubst g h su e)
+      = EffTerm (genericSubst g cf h su e)
 
 genericSubst :: (Binder -> b -> Effect)
+             -> (Symbol -> Symbol)
              -> ((Symbol, SpecType) -> (Symbol, SpecType))
              -> [(Symbol, b)]
              -> Effect
              -> Effect
-genericSubst g h = goTerm
+genericSubst f g h = goTerm
   where
     goTerm su e@(EffVar s)
-      = withMatch su s e g
+      = withMatch su s e f
     goTerm su e@(EffLit _)
       = e
     goTerm su (NonDet es)
@@ -167,11 +216,11 @@ genericSubst g h = goTerm
       = AbsEff s (goTerm (restrict su (symbol s)) m)
     goTerm su (Nu s m)
       = Nu s (goTerm (restrict su (symbol s)) m)
-    goTerm su (Bind m g)
-      = Bind (goTerm su m) (goTerm su g)
+    goTerm su (Bind m f)
+      = Bind (goTerm su m) (goTerm su f)
     goTerm su (Par p q)
       = Par (goTerm su p) (goTerm su q)
     goTerm su (Assume s (c, bs) e)
-      = Assume s (c, bs) (goTerm su e)
+      = Assume (g s) (c, bs) (goTerm su e)
     goTerm su (Pend e i)
       = Pend (goTerm su e) (h i)

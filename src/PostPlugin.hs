@@ -70,6 +70,8 @@ betaReduceTy (ETyApp e1 e2)
   = ETyApp (betaReduceTy e1) (betaReduceTy e2)
 betaReduceTy (EffTerm e)
   = EffTerm (betaReduce e)
+betaReduceTy e@(ETyVar _)
+  = e
 betaReduceTy EffNone
   = EffNone
 
@@ -108,8 +110,13 @@ freshTermVar = do n <- freshInt
                   return (symbol ("x" ++ show n))
 freshChanVar = do n <- freshInt
                   return (symbol ("p" ++ show n))
+freshEffTyVar = do n <- freshInt
+                   return (ETyVar (symbol ("E" ++ show n)))
 
 freshFnEff :: EffTy -> EffectM EffTy
+freshFnEff t@(EForAll s e)
+  = do v <- freshEffTyVar
+       freshFnEff (sub [(s, v)] e)
 freshFnEff t@(ETermAbs s e)
   = do v <- freshEffVar
        freshFnEff (sub [(s, EffVar (Eff v))] e)
@@ -235,9 +242,11 @@ synthEffects g (cb:cbs)
 
 synth1Effect :: EffEnv -> CoreBind -> EffectM EffEnv 
 synth1Effect g (NonRec b e)
-  = do et <- synthEff g e 
-       liftIO $ putStrLn (printf "%s : %s" (getOccString b) (printEff $ betaReduceTy et))
-       return (M.insert (getName b) et g)
+  = do et  <- applySubstM =<< synthEff g e
+       g'  <-  mapM applySubstM g
+       let egen = generalizeEff g' et
+       liftIO $ putStrLn (printf "%s : %s" (getOccString b) (printEff $ betaReduceTy egen))
+       return (M.insert (getName b) (generalizeEff g' egen) g')
 
 lookupEff :: EffEnv -> CoreExpr -> EffectM EffTy
 lookupEff g e@(Var x)
@@ -248,11 +257,11 @@ lookupEff g e@(Var x)
                       RecSelId {} -> True
                       _ -> False
 lookupEff g e@(Var x)
-  = case M.lookup (getName x) g of
-      Nothing -> do
-        let t = CoreUtils.exprType e
-        defaultEff (CoreUtils.exprType e)
-      Just e  -> return e
+  = do t <- case M.lookup (getName x) g of
+              Nothing -> do
+                defaultEff (CoreUtils.exprType e)
+              Just e  -> return e
+       return t
 
 bkFun :: Type -> Maybe ([TyVar], [Type], Type)
 bkFun t
@@ -290,8 +299,12 @@ defaultEff t
   = case splitFunTy_maybe t of
       Just (tin, tout) -> do
         return noEff
-  | otherwise
-  = return noEff
+defaultEff t
+  = go =<< isEffectType t
+  where
+    go True = EffTerm <$> EffVar <$> (Eff <$> freshEffVar)
+    go _    = return noEff
+       
 
 isEffectType :: Type -> EffectM Bool
 isEffectType t
@@ -307,16 +320,17 @@ isEffectType t
 synthEff :: EffEnv -> CoreExpr -> EffectM(EffTy)
 synthEff g e@(Var x)
   = do as <- lookupAnn x
-       -- liftIO $ putStrLn (symbolString (symbol x))
+       eff <- consult as
+       freshFnEff eff {- >>= dbgTy "synthEff: Var" -}
        -- liftIO $ putStrLn (show as)
-       case as of
-         [t] -> case parseEffTy t of
-                  Right et -> return et
-         _   -> lookupEff g e
+  where
+    consult [t] = case parseEffTy t of
+                    Right et -> return et
+    consult _   = lookupEff g e
 synthEff g (Tick _ e)
   = synthEff g e
 synthEff g (App e@(Var f) (Type x))
-  = isEffectType x >>= lookupFunType
+  = isEffectType x >>= lookupFunType >>= freshFnEff
   where
     lookupFunType isEffect
       | isEffect &&
@@ -330,7 +344,7 @@ synthEff g (App e@(Var f) (Type x))
 synthEff g (App e (Type t))
   = synthEff g e
 synthEff g (App e m)
-  | skip (CoreUtils.exprType m)
+  | not (isTypeArg m) && skip (CoreUtils.exprType m)
   = synthEff g e
   where
     skip t
@@ -339,7 +353,6 @@ synthEff g (App e m)
                            Just (tc, tys) -> not (L.null tys)
                            _ -> True
       | otherwise      = False
-
 synthEff g (Lit l)
   = return $ noEff 
 synthEff g (Let b e)
@@ -349,18 +362,22 @@ synthEff g (Lam b e)
   | isTyVar b
   = synthEff g e
   | otherwise
-  = do te <- synthEff g e
-       return (EPi (symbol b) noEff te)
+  = do arge  <- freshEffTyVar
+       te    <- synthEff (M.insert (getName b) arge g) e
+       arge' <- applySubstM arge
+       return (EPi (symbol b) arge' te)
 synthEff g (App eFun eArg)
-  = do funEff                     <- synthEff g eFun
-       funEffFresh                <- freshFnEff funEff
-       let EPi s freshIn freshOut = funEffFresh
-       argEff                     <- synthEff g eArg
-       tyArg                      <- lookupSpecType eArg
-       tyIn                       <- unifyTysM argEff (maybeSubArg s tyArg freshIn)
-       tyOut                      <- maybeSubArg s tyArg <$> applySubstM freshOut
-       -- liftIO (putStrLn (printf "(%s => %s) %s" (printEff (maybeSubArg s tyArg freshIn)) (printEff (maybeSubArg s tyArg (sub tu' (sub eu' freshOut)))) (printEff (argEff))))
-       return tyOut
+  = do funEff                     <- applySubstM =<<
+                                     synthEff g eFun
+       argEff                     <- applySubstM =<<
+                                     synthEff g eArg
+       v                          <- freshTermVar
+       let x = maybe v id $ maybeExtractVar eArg
+       e                          <- freshEffTyVar
+       EPi s tIn tOut             <- applySubstM =<<
+                                     unifyTysM funEff (EPi v argEff e)
+       reft                       <- lookupSpecType eArg
+       maybeSubArg s reft <$> applySubstM e
   where
     maybeSubArg :: Symbol -> SpecType -> EffTy -> EffTy
     maybeSubArg s t e
@@ -374,6 +391,26 @@ synthEff g (Case e x t alts)
     app e = AppEff (AppEff e (EffVar kont)) (EffVar me)
     ex = maybe err id $ maybeExtractVar e
     err = error "Not a var (case)"
+
+generalizeEff g
+  = gen freeEffTyVars EForAll . gen freeEffTermVars ETermAbs
+  where
+    gen f c t
+      = L.foldr go t free 
+      where
+        go s t = c s t
+        free = fvs L.\\ gvs
+        fvs = f t
+        gvs = nub (concatMap f $ M.elems g)
+    -- generalizeTerm g t
+    --   = L.foldr go t free 
+    --   where
+    --     go s t = ETermAbs s t
+    --     free =fvs L.\\ gvs
+    --     fvs = freeEffTermVars t
+    --     gvs = nub (concatMap freeEffTermVars $ M.elems g)
+    -- generalizeTy g t
+    
 
 altEffect :: EffEnv -> CoreAlt -> EffectM (Symbol, [Symbol], EffTy)
 altEffect g (DataAlt dc, bs, e)
@@ -392,15 +429,17 @@ applySubstM :: EffTy -> EffectM EffTy
 applySubstM t
   = do tsu <- gets tsubst
        esu <- gets esubst
-       return (sub tsu (sub esu t))
+       return (sub esu (sub tsu t))
 
 unifyTysM :: EffTy -> EffTy -> EffectM EffTy
 unifyTysM t1 t2
   = do tsu <- gets tsubst
        esu <- gets esubst
-       (tsu, esu, t) <- unifyTermTys tsu esu t1 t2
+       (tsu, esu, t) <- unifyTermTys tsu esu (ap tsu esu t1) (ap tsu esu t2)
        modify $ \s -> s { tsubst = tsu, esubst = esu }
        return t
+  where
+    ap tsu esu = sub tsu . sub esu
 
 unifyTermTys tSub eSub EffNone EffNone
   = return (tSub, eSub, EffNone)
@@ -432,7 +471,7 @@ unifyTermTys tSub eSub t t'@(ETermAbs _ _)
 unifyTermTys tsub esub t1 t2
   = error oops  -- (printEff t1) (printEff t2))
   where
-    oops = printf "%s unify %s (%s) (%s)" (printEff t1) (printEff t2) (show tsub) (show esub)
+    oops = printf "%s unify %s (%s) (%s)" (printEff t1) (printEff t2) (show tsub) (printSubst printEffTerm esub)
 
 unifyTerms su (EffVar (Eff t)) e
   | t `notElem` dom su
@@ -544,3 +583,17 @@ lookupType s e = do
   case H.lookup s ann of
     Nothing  -> return (ofType (CoreUtils.exprType e)) -- error ("uhg oh" ++ show s)
     Just [t] -> return t
+
+dbgTy :: String -> EffTy -> EffectM EffTy
+dbgTy m t = liftIO (putStrLn (printf "%s: %s" m (printEff t))) >> return t
+
+dbgSubst :: String -> EffectM ()
+dbgSubst m = do
+  tsu <- gets tsubst
+  esu <- gets esubst
+  liftIO (putStrLn (printf "%s %s %s" m (printSubst printEff tsu) (printSubst printEffTerm esu)))
+            
+printSubst :: (a -> String) -> [(Symbol, a)] -> String
+printSubst f = concatMap go
+  where
+    go (x,y) = printf "[%s := %s]" (symbolString x) (f y)
