@@ -99,7 +99,7 @@ instance Symbolic Binder where
 filterSubst f su
   = [ (x,y) | (x,y) <- su, f x y ]
 
-catSubst :: [(Symbol, a)] -> [(Symbol, a)] -> [(Symbol, a)]
+catSubst :: EffectSubst a a => [(Symbol, a)] -> [(Symbol, a)] -> [(Symbol, a)]
 catSubst su1 su2
   = sub su2 su1 ++ filterSubst uniq su2
   where
@@ -109,11 +109,11 @@ catSubst su1 su2
 class EffectSubst a b where
   sub :: [(Symbol, a)] -> b -> b
 
-instance EffectSubst a (Symbol, a) where
-  sub su (s, x) =
-    case lookup s su of
-      Just x' -> (s, x')
-      Nothing -> (s, x)
+instance EffectSubst a b => EffectSubst a (Symbol, b) where
+  sub su (s, x) = (s, sub su x)
+    -- case lookup s su of
+    --   Just x' -> (s, x')
+    --   Nothing -> (s, x)
 
 instance EffectSubst a b => EffectSubst a [b] where
   sub su = (sub su <$>)

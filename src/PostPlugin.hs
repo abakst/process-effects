@@ -152,7 +152,7 @@ printEff (ETyVar s)
 printEff (EForAll s t)
   = printf "∀%s. %s" (symbolString s) (printEff t)
 printEff (EPi s e1 e2)
-  = printf "(Π%s:%s. %s)" (symbolString s) (printEff e1) (printEff e2)
+  = printf "(%s:%s -> %s)" (symbolString s) (printEff e1) (printEff e2)
 printEff (ETyApp e1 e2)
   = printf "(%s %s)" (printEff e1) (printEff e2)
 printEff (ETermAbs s e)
@@ -248,6 +248,14 @@ synth1Effect g (NonRec b e)
        liftIO $ putStrLn (printf "%s : %s" (getOccString b) (printEff $ betaReduceTy egen))
        return (M.insert (getName b) (generalizeEff g' egen) g')
 
+synth1Effect g (Rec [(b,e)])              
+  = do tv <- freshEffTyVar
+       let g' = M.insert (getName b) tv g
+       et <- applySubstM =<< synthEff g' e
+       betaReduceTy <$> applySubstM et
+       applySubstM tv
+       error "adsfl"
+
 lookupEff :: EffEnv -> CoreExpr -> EffectM EffTy
 lookupEff g e@(Var x)
   | isRecordSel x
@@ -255,7 +263,7 @@ lookupEff g e@(Var x)
   where
     isRecordSel x = case idDetails x of
                       RecSelId {} -> True
-                      _ -> False
+                      _           -> False
 lookupEff g e@(Var x)
   = do t <- case M.lookup (getName x) g of
               Nothing -> do
@@ -367,9 +375,10 @@ synthEff g (Lam b e)
        arge' <- applySubstM arge
        return (EPi (symbol b) arge' te)
 synthEff g (App eFun eArg)
-  = do funEff                     <- applySubstM =<<
+  = do funEff                     <- dbgTy "funEff" =<<
+                                     applySubstM =<<
                                      synthEff g eFun
-       argEff                     <- applySubstM =<<
+       argEff                     <- dbgTy "argEff" =<< applySubstM =<<
                                      synthEff g eArg
        v                          <- freshTermVar
        let x = maybe v id $ maybeExtractVar eArg
@@ -377,7 +386,7 @@ synthEff g (App eFun eArg)
        EPi s tIn tOut             <- applySubstM =<<
                                      unifyTysM funEff (EPi v argEff e)
        reft                       <- lookupSpecType eArg
-       maybeSubArg s reft <$> applySubstM e
+       betaReduceTy <$> maybeSubArg s reft <$> applySubstM e
   where
     maybeSubArg :: Symbol -> SpecType -> EffTy -> EffTy
     maybeSubArg s t e
@@ -435,50 +444,61 @@ unifyTysM :: EffTy -> EffTy -> EffectM EffTy
 unifyTysM t1 t2
   = do tsu <- gets tsubst
        esu <- gets esubst
-       (tsu, esu, t) <- unifyTermTys tsu esu (ap tsu esu t1) (ap tsu esu t2)
+       (tsu, esu, t) <- unifyTys tsu esu (ap tsu esu t1) (ap tsu esu t2)
        modify $ \s -> s { tsubst = tsu, esubst = esu }
        return t
   where
-    ap tsu esu = sub tsu . sub esu
+    ap tsu esu = sub esu . sub tsu
+
+unifyTys tsu esu t1 t2                 
+  = do liftIO (putStrLn (printf "UNIFY:\n%s\n%s\n\n\tsubt:(%s)\n\tsube:(%s)" (printEff t1) (printEff t2) (printSubst printEff tsu) (printSubst printEffTerm esu)))
+       unifyTermTys tsu esu t1 t2 
 
 unifyTermTys tSub eSub EffNone EffNone
   = return (tSub, eSub, EffNone)
 unifyTermTys tSub eSub (ETyVar t) t'
   | t `notElem` dom tSub
-  = return (tSub `catSubst` [(t, t')], eSub, t')
+  = return (tSub', eSub, t')
+  where
+    tSub' = tSub `catSubst` [(t, t')]
 unifyTermTys tSub eSub t' (ETyVar t)
   | t `notElem` dom tSub
-  = return (tSub `catSubst` [(t, t')], eSub, t')
+  = return (tSub', eSub, t')
+  where
+    tSub' = tSub `catSubst` [(t, t')]
 unifyTermTys tSub eSub (EffTerm t1) (EffTerm t2)
   = do let (eSub', t) = unifyTerms eSub t1 t2
        return (tSub, eSub', EffTerm t)
 unifyTermTys tSub eSub f@(EPi s t1 t2) (EPi s' t1' t2')
   = do v                     <- freshTermVar
-       (tSub1, eSub1, tyIn)  <- unifyTermTys tSub eSub (sub [(s,v)] t1) (sub [(s',v)] t1')
-       (tSub2, eSub2, tyOut) <- unifyTermTys tSub1 eSub1 (sub [(s,v)] t2) (sub [(s',v)] t2')
-       return (tSub2, eSub2, EPi v tyIn tyOut)
+       (tSub1, eSub1, tyIn)  <- unifyTys tSub eSub (sub [(s,v)] t1) (sub [(s',v)] t1')
+       let ap = sub eSub1 . sub tSub1 
+       (tSub2, eSub2, tyOut) <- unifyTys tSub1 eSub1 (ap $ sub [(s,v)] t2) (ap $ sub [(s',v)] t2')
+       return (sub eSub2 (sub eSub1 tSub2), eSub2, EPi v tyIn tyOut)
 unifyTermTys tSub eSub (ETermAbs s t) (ETermAbs s' t')
   = do e         <- freshEffVar
        let inst  = [(s, EffVar (Eff e))]
-       (tSub, eSub, t'') <- unifyTermTys tSub eSub (sub inst t) (sub inst t')
+       (tSub, eSub, t'') <- unifyTys tSub eSub (sub inst t) (sub inst t')
        return (tSub, eSub, ETermAbs e t'')
 unifyTermTys tSub eSub t@(ETermAbs _ _) t'
   = do e <- freshEffVar
-       unifyTermTys tSub eSub t (ETermAbs e t')
+       unifyTys tSub eSub t (ETermAbs e t')
 unifyTermTys tSub eSub t t'@(ETermAbs _ _)
   = do e <- freshEffVar
-       unifyTermTys tSub eSub (ETermAbs e t) t'
+       unifyTys tSub eSub (ETermAbs e t) t'
 unifyTermTys tsub esub t1 t2
   = error oops  -- (printEff t1) (printEff t2))
   where
-    oops = printf "%s unify %s (%s) (%s)" (printEff t1) (printEff t2) (show tsub) (printSubst printEffTerm esub)
+    oops = printf "%s unify %s\nsubt:(%s)\nsube:(%s)" (printEff t1) (printEff t2) (printSubst printEff tsub) (printSubst printEffTerm esub)
 
 unifyTerms su (EffVar (Eff t)) e
-  | t `notElem` dom su
+  | t `notElem` dom su && 
+    not (occurs t e)
     = let su' = su `catSubst` [(t, e)] in
       (su', sub su' e)
 unifyTerms su e (EffVar (Eff t))
-  | t `notElem` dom su
+  | t `notElem` dom su && 
+    not (occurs t e)
     = let su' = su `catSubst` [(t, e)] in
       (su', sub su' e)
 unifyTerms su (AppEff (EffVar (Eff t)) (EffVar (Src x))) e'
@@ -500,6 +520,9 @@ unifyTerms su (AppEff m n) (AppEff m' n')
   = let (su', m'')  = unifyTerms su m m'
         (su'', n'') = unifyTerms su' (sub su' n) (sub su' n')
     in  (su'', AppEff m'' n'')
+unifyTerms su (Pend e s) (Pend e' s')
+  = let (su, e'') = unifyTerms su e e' in
+    (su, Pend e'' s)
 unifyTerms su (Pend e s) e'
   = unifyTerms su e e'
 unifyTerms su e (Pend e' s)
@@ -510,8 +533,9 @@ unifyTerms su (NonDet es) (NonDet es')
       (su', es') = L.foldr go (su, []) (zip es es')
       go (e,e') (su, es) = let (su', e'') = unifyTerms su e e' in
                            (su', e'':es)
-unifyTerms sub t@(EffVar _) (EffVar _)
-  = (sub, t) -- should probably check these are the same!!!!
+unifyTerms sub e@(EffVar x) (EffVar y)
+  | x == y
+  = (sub, e) -- should probably check these are the same!!!!
 unifyTerms sub t@(EffLit t1) (EffLit t2)
   = (sub, t)
 unifyTerms su (Bind m1 n1) (Bind m2 n2)
@@ -523,6 +547,10 @@ unifyTerms sub t1 t2
   where
     oops :: String
     oops = (printf "%s unifyTerm %s" (printEffTerm t1) (printEffTerm t2))
+
+occurs :: Symbol -> Effect -> Bool
+occurs s e
+  = s `elem` freeEffTermVars (EffTerm e)
 
 fst3 (x,_,_) = x
 snd3 (_,y,_) = y
