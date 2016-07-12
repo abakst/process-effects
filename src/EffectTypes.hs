@@ -5,6 +5,9 @@ module EffectTypes ( Binder(..)
                    , EffTy(..)
                    , EffectSubst(..)
                    , Info(..)
+                   , betaReduceTy
+                   , betaReduce
+                   , applyArg, abstractArg
                    , freeEffTyVars
                    , freeEffTermVars
                    , symbolString
@@ -47,6 +50,67 @@ data EffTy  = EPi Symbol EffTy EffTy
             | EffTerm Effect
             | EffNone
               deriving Show
+
+betaReduceTy (EPi s e1 e2)
+  = EPi s (betaReduceTy e1) (betaReduceTy e2)
+betaReduceTy (ETermAbs s e)
+  = ETermAbs s (betaReduceTy e)
+betaReduceTy (EForAll s e)
+  = EForAll s (betaReduceTy e)
+betaReduceTy (ETyApp e1 e2)
+  = ETyApp (betaReduceTy e1) (betaReduceTy e2)
+betaReduceTy (EffTerm e)
+  = EffTerm (betaReduce e)
+betaReduceTy e@(ETyVar _)
+  = e
+betaReduceTy EffNone
+  = EffNone
+
+betaReduce :: Effect -> Effect
+betaReduce (Nu b e) = Nu b (betaReduce e)
+betaReduce (NonDet es) = NonDet (betaReduce <$> es)
+betaReduce (Par e1 e2)
+  = Par (betaReduce e1) (betaReduce e2)
+betaReduce (Bind e1 e2)
+  = Bind (betaReduce e1) (betaReduce e2)
+betaReduce (AbsEff s e)
+  = AbsEff s (betaReduce e)
+betaReduce (AppEff e1 e2)
+  = let e2' = betaReduce e2 in
+    case betaReduce e1 of
+      AbsEff (Eff s) m -> betaReduce $ sub [(s, e2')] m
+      AbsEff (Src s) m -> betaReduce $ sub [(s, e2')] m
+      -- AbsEff (Src s) x -> Pend (betaReduce $ sub [(s, e2')] m) xt
+      -- e1' -> error (printf "%s %s" (printEffTerm e1') (printEffTerm e2')) -- AppEff e1' e2'
+      -- e1'@(AbsEff (Eff s) m) ->
+      --   betaReduce $ sub [(s, e2')] m
+      -- e1'@(AbsEff (Src s) m) ->
+      --   case e2' of
+      --     Pend (EffVar (Src v)) (x,t) ->
+      --       betaReduce $ Pend (sub [(s, v)] m) (x,t)
+      --     EffVar (Src v) ->
+      --       betaReduce $ sub [(s, v)] m
+      e1' -> AppEff e1' e2'
+betaReduce (Pend e xt) = Pend (betaReduce e) xt
+betaReduce (Assume s (c,bs) e) = Assume s (c,bs) (betaReduce e)
+betaReduce e = e
+
+
+applyArg :: Symbol -> SpecType -> EffTy -> EffTy
+applyArg x t = go
+  where
+    go EffNone           = EffNone
+    go (ETyApp e1 e2)    = ETyApp (go e1) (go e2)
+    go (EPi s' t1' t2')  = EPi s' t1' (go t2')
+    go (EffTerm e)       = EffTerm (betaReduce $ AppEff e (Pend (EffVar (Src x)) (x,t)))
+
+abstractArg :: Symbol -> EffTy -> EffTy
+abstractArg x = go
+  where
+    go EffNone           = EffNone
+    go (ETyApp e1 e2)    = ETyApp (go e1) (go e2)
+    go (EPi s' t1' t2')  = EPi s' t1' (go t2')
+    go (EffTerm e)       = EffTerm (AbsEff (Src x) e)
 
 -- SO BAD, PLEASE REFACTOR ME!!!
 freeEffTyVars :: EffTy -> [Symbol]                       
@@ -143,14 +207,14 @@ instance EffectSubst Symbol Effect where
 instance EffectSubst Effect EffTy where         
   sub = genericSubstTy (\s _ -> ETyVar s) go id id
     where
-      go b@(Src _) _ = EffVar b
-      go (Eff _) e   = e
+      go (Src _) e = e
+      go (Eff _) e = e
 
 instance EffectSubst Effect Effect where         
   sub = genericSubst go id id
     where
-      go b@(Src _) _ = EffVar b
-      go (Eff _) e   = e
+      go (Src _) e = e
+      go (Eff _) e = e
 
 instance EffectSubst EffTy EffTy where         
   sub = genericSubstTy (\x y -> y) (\s _ -> EffVar s) id id

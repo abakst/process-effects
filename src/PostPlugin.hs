@@ -60,47 +60,6 @@ data EffState = EffState {
 type EffectM a = StateT EffState IO a
 
 type EffEnv = M.Map Name EffTy
-betaReduceTy (EPi s e1 e2)
-  = EPi s (betaReduceTy e1) (betaReduceTy e2)
-betaReduceTy (ETermAbs s e)
-  = ETermAbs s (betaReduceTy e)
-betaReduceTy (EForAll s e)
-  = EForAll s (betaReduceTy e)
-betaReduceTy (ETyApp e1 e2)
-  = ETyApp (betaReduceTy e1) (betaReduceTy e2)
-betaReduceTy (EffTerm e)
-  = EffTerm (betaReduce e)
-betaReduceTy e@(ETyVar _)
-  = e
-betaReduceTy EffNone
-  = EffNone
-
-betaReduce :: Effect -> Effect
-betaReduce (Nu b e) = Nu b (betaReduce e)
-betaReduce (NonDet es) = NonDet (betaReduce <$> es)
-betaReduce (Par e1 e2)
-  = Par (betaReduce e1) (betaReduce e2)
-betaReduce (Bind e1 e2)
-  = Bind (betaReduce e1) (betaReduce e2)
-betaReduce (AbsEff s e)
-  = AbsEff s (betaReduce e)
-betaReduce (AppEff e1 e2)
-  = let e2' = betaReduce e2 in
-    case betaReduce e1 of
-      e1'@(AbsEff (Eff s) m) ->
-        betaReduce $ sub [(s, e2')] m
-      e1'@(AbsEff (Src s) m) ->
-        case e2' of
-          Pend (EffVar (Src v)) (x,t) ->
-            betaReduce $ Pend (sub [(s, v)] m) (x,t)
-          EffVar (Src v) ->
-            betaReduce $ sub [(s, v)] m
-          _ -> AppEff e1' e2'
-      e1' -> AppEff e1' e2'
-betaReduce (Pend e xt) = Pend (betaReduce e) xt
-betaReduce (Assume s (c,bs) e) = Assume s (c,bs) (betaReduce e)
-betaReduce e = e
-
 freshInt = do n <- gets ctr
               modify $ \s -> s { ctr = n + 1}
               return n
@@ -174,13 +133,12 @@ bindEffectTy = ETermAbs e0Sym
              $ EPi actSym (EffTerm (EffVar (Eff e0Sym)))
              $ EPi fSym
                  (EPi xSym noEff
-                        (EffTerm (effBindF
-                                     (AppEff (EffVar (Eff e1Sym))
-                                              (EffVar (Src xSym))))))
-                 (EffTerm (effBindF
-                              (AppEff (AppEff (EffVar (Eff e0Sym))
-                                                (EffVar (Eff e1Sym)))
-                                                (EffVar me))))
+                        (EffTerm (EffVar (Eff e1Sym))))
+                 (EffTerm (absEff (Src fSym)
+                                    (effBindF
+                                     (AppEff (AppEff (EffVar (Eff e0Sym))
+                                                       (EffVar (Eff e1Sym)))
+                                      (EffVar me)))))
   where
     fSym = symbol "f"
     actSym = symbol "act"
@@ -242,7 +200,7 @@ synthEffects g (cb:cbs)
 
 synth1Effect :: EffEnv -> CoreBind -> EffectM EffEnv 
 synth1Effect g (NonRec b e)
-  = do et  <- applySubstM =<< synthEff g e
+  = do et  <-  dbgTy "got" =<< applySubstM =<< synthEff g e
        g'  <-  mapM applySubstM g
        let egen = generalizeEff g' et
        liftIO $ putStrLn (printf "%s : %s" (getOccString b) (printEff $ betaReduceTy egen))
@@ -281,27 +239,34 @@ bkFun t
 
 walkTyVars f t
   | isTyVarTy t
-    = f (fromJust (getTyVar_maybe t))
+    = return $ f (fromJust (getTyVar_maybe t))
   | otherwise 
     = case bkFun t of
-        Just (tvs, ts, tout) ->
-          let ets  = walkTyVars f <$> (ts ++ [tout])
-          in L.foldr1 (EPi (symbol "_")) ets 
+        Just (tvs, ts, tout) -> do
+          e:ets <- mapM (walkTyVars f) (tout : reverse ts)
+          foldM go e ets
         Nothing ->
-          noEff
-                 
+          return noEff
+  where
+    go :: EffTy -> EffTy -> EffectM EffTy
+    go t t' = do x <- freshTermVar
+                 return $ EPi x t' t
+            
+
 defaultEff :: Type -> EffectM EffTy
 defaultEff t
   | isJust (bkFun t)
   = do is <- mapM (const freshInt) tvs
        let evs    = zip tvs (sym <$> is)
            sym    = symbol . ("E" ++) . show
-           ets    = walkTyVars (go evs) <$> (targs ++ [tout])
-           funTy  = L.foldr1 (EPi (symbol "_")) ets
+       e:ets <- mapM (walkTyVars (go evs)) $ (tout : reverse targs)
+       funTy <- foldM goPi e ets
        return funTy
   where
     Just (tvs, targs, tout) = bkFun t
     go evs tv = maybe noEff ETyVar $ L.lookup tv evs
+    goPi t t' = do x <- freshTermVar
+                   return $ EPi x t' t
 defaultEff t
   | Type.isFunTy t
   = case splitFunTy_maybe t of
@@ -370,10 +335,10 @@ synthEff g (Lam b e)
   | isTyVar b
   = synthEff g e
   | otherwise
-  = do arge  <- freshEffTyVar
+  = do arge  <- defaultEff (varType b)
        te    <- synthEff (M.insert (getName b) arge g) e
        arge' <- applySubstM arge
-       return (EPi (symbol b) arge' te)
+       return (EPi (symbol b) arge' (abstractArg (symbol b) te))
 synthEff g (App eFun eArg)
   = do funEff                     <- dbgTy "funEff" =<<
                                      applySubstM =<<
@@ -383,14 +348,14 @@ synthEff g (App eFun eArg)
        v                          <- freshTermVar
        let x = maybe v id $ maybeExtractVar eArg
        e                          <- freshEffTyVar
-       EPi s tIn tOut             <- applySubstM =<<
-                                     unifyTysM funEff (EPi v argEff e)
+       EPi s tIn tOut             <- applySubstM =<< unifyTysM funEff (EPi v argEff e)
        reft                       <- lookupSpecType eArg
-       betaReduceTy <$> maybeSubArg s reft <$> applySubstM e
+       applyArg x reft <$> applySubstM tOut
+       -- betaReduceTy <$> maybeSubArg s reft <$> applySubstM tOut
   where
-    maybeSubArg :: Symbol -> SpecType -> EffTy -> EffTy
-    maybeSubArg s t e
-      = maybe e (\v -> sub [(s, Info (v,t))] e) $ maybeExtractVar eArg
+    -- maybeSubArg :: Symbol -> SpecType -> EffTy -> EffTy
+    -- maybeSubArg s t e
+    --   = maybe e (\v -> applyArg (s, Info (v,t)) e) $ maybeExtractVar eArg
 
 synthEff g (Case e x t alts)
   = do es <- mapM (altEffect g) alts

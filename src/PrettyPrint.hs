@@ -18,7 +18,8 @@ pretty :: Pretty a => a -> Doc
 pretty = pprintPrec 0       
 
 instance Pretty Binder where
-  pprintPrec z b = pprintPrec z (symbol b)
+  pprintPrec z (Src b) = pprintPrec z (symbol b)
+  pprintPrec z (Eff b) = pprintPrec z (symbol b) <> text "*"
 
 instance Pretty Fp.Symbol where
   pprintPrec _ s = text (symbolString s)
@@ -74,7 +75,7 @@ instance Pretty Effect where
          text ">>=" <+>
          pprintPrec (za + 1) e2)
     where
-      za = 5
+      za = 2
   pprintPrec z (Par e1 e2)
     = parensIf (z > za) $
         (pprintPrec (za + 1) e1 <+>
