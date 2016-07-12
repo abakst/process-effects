@@ -41,6 +41,7 @@ import Language.Haskell.Liquid.GHC.Misc
 import Language.Haskell.Liquid.UX.Tidy
 
 import Language.Fixpoint.Types hiding (PPrint(..), SrcSpan(..), ECon) 
+import qualified Language.Fixpoint.Types as Fp
 
 debug s x = trace (s ++ ": " ++ show x) x  
 
@@ -134,11 +135,16 @@ bindEffectTy = ETermAbs e0Sym
              $ EPi fSym
                  (EPi xSym noEff
                         (EffTerm (EffVar (Eff e1Sym))))
-                 (EffTerm (absEff (Src fSym)
-                                    (effBindF
-                                     (AppEff (AppEff (EffVar (Eff e0Sym))
-                                                       (EffVar (Eff e1Sym)))
-                                      (EffVar me)))))
+                 (EffTerm (absEff (Src actSym)
+                          (absEff (Src fSym)
+                          (effBindF
+                           (AppEff (AppEff (EffVar (Eff e0Sym))
+                                    (AbsEff (Src (symbol "_0"))
+                                      (AppEff (AppEff (AppEff (EffVar (Eff e1Sym))
+                                                              (EffVar (Src (symbol "_0"))))
+                                                      (EffVar kont))
+                                              (EffVar me))))
+                            (EffVar me))))))
   where
     fSym = symbol "f"
     actSym = symbol "act"
@@ -149,10 +155,11 @@ bindEffectTy = ETermAbs e0Sym
 thenEffectTy = ETermAbs e0Sym
              $ ETermAbs e1Sym
              $ EPi fSym (EffTerm (EffVar (Eff e0Sym)))
-             $ EPi gSym (EffTerm (AbsEff kont (AbsEff me (EffVar (Eff e1Sym)))))
-             $ EffTerm (effBindF (AppEff (AppEff (EffVar (Eff e0Sym))
+             $ EPi gSym (EffTerm (EffVar (Eff e1Sym)))
+             $ EffTerm (absEff (Src fSym)
+                                 (effBindF (AppEff (AppEff (EffVar (Eff e0Sym))
                                               (AbsEff (Src (symbol "_")) (EffVar (Eff e1Sym))))
-                              (EffVar me)))
+                                            (EffVar me))))
   where
     fSym = symbol "f"
     gSym = symbol "g"
@@ -246,11 +253,11 @@ walkTyVars f t
           e:ets <- mapM (walkTyVars f) (tout : reverse ts)
           foldM go e ets
         Nothing ->
-          return noEff
+          defaultEff t
   where
     go :: EffTy -> EffTy -> EffectM EffTy
     go t t' = do x <- freshTermVar
-                 return $ EPi x t' t
+                 return $ EPi x t' (abstractArg x t)
             
 
 defaultEff :: Type -> EffectM EffTy
@@ -266,12 +273,13 @@ defaultEff t
     Just (tvs, targs, tout) = bkFun t
     go evs tv = maybe noEff ETyVar $ L.lookup tv evs
     goPi t t' = do x <- freshTermVar
-                   return $ EPi x t' t
-defaultEff t
-  | Type.isFunTy t
-  = case splitFunTy_maybe t of
-      Just (tin, tout) -> do
-        return noEff
+                   return $ EPi x t' (abstractArg x t)
+-- defaultEff t
+--   | Type.isFunTy t
+--   = case splitFunTy_maybe t of
+--       Just (tin, tout) -> do
+--         liftIO $ putStrLn "asdf!!!!!!!!"
+--         return noEff
 defaultEff t
   = go =<< isEffectType t
   where
@@ -338,7 +346,7 @@ synthEff g (Lam b e)
   = do arge  <- defaultEff (varType b)
        te    <- synthEff (M.insert (getName b) arge g) e
        arge' <- applySubstM arge
-       return (EPi (symbol b) arge' (abstractArg (symbol b) te))
+       return (EPi (symbol b) arge' (abstractArg (symbol b) (betaReduceTy te)))
 synthEff g (App eFun eArg)
   = do funEff                     <- dbgTy "funEff" =<<
                                      applySubstM =<<
@@ -350,6 +358,8 @@ synthEff g (App eFun eArg)
        e                          <- freshEffTyVar
        EPi s tIn tOut             <- applySubstM =<< unifyTysM funEff (EPi v argEff e)
        reft                       <- lookupSpecType eArg
+       liftIO $ putStrLn (printf "applyArg %s" (symbolString x))
+       liftIO $ putStrLn (printf "reft %s" (Fp.showpp (rTypeReft reft)))
        applyArg x reft <$> applySubstM tOut
        -- betaReduceTy <$> maybeSubArg s reft <$> applySubstM tOut
   where

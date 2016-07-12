@@ -108,9 +108,11 @@ abstractArg :: Symbol -> EffTy -> EffTy
 abstractArg x = go
   where
     go EffNone           = EffNone
+    go (EForAll s t)     = EForAll s (go t)
     go (ETyApp e1 e2)    = ETyApp (go e1) (go e2)
     go (EPi s' t1' t2')  = EPi s' t1' (go t2')
     go (EffTerm e)       = EffTerm (AbsEff (Src x) e)
+    go e                 = e
 
 -- SO BAD, PLEASE REFACTOR ME!!!
 freeEffTyVars :: EffTy -> [Symbol]                       

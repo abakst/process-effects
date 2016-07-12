@@ -34,9 +34,7 @@ instance Pretty Effect where
         if not $ Fp.isTautoPred p then
           parens (
                   text "where" <+> 
-                       -- Fp.pprint (symbol x) <+> colon <+> Fp.pprint p
                        Fp.pprint (Fp.subst1 p (vv, Fp.expr (symbol x)))
-                       -- Fp.pprint (Fp.subst1 p (vv, Fp.expr (symbol x)))
                  )
         else
           empty
