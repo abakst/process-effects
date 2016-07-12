@@ -96,13 +96,15 @@ betaReduce (Assume s (c,bs) e) = Assume s (c,bs) (betaReduce e)
 betaReduce e = e
 
 
-applyArg :: Symbol -> SpecType -> EffTy -> EffTy
-applyArg x t = go
+applyArg :: Symbol -> EffTy -> EffTy
+applyArg x = go
   where
     go EffNone           = EffNone
+    go (EForAll x' t)    = t -- WRONG
     go (ETyApp e1 e2)    = ETyApp (go e1) (go e2)
     go (EPi s' t1' t2')  = EPi s' t1' (go t2')
-    go (EffTerm e)       = EffTerm (betaReduce $ AppEff e (Pend (EffVar (Src x)) (x,t)))
+    go (EffTerm e)       = EffTerm (betaReduce $ AppEff e (EffVar (Src x)))
+    go e = e
 
 abstractArg :: Symbol -> EffTy -> EffTy
 abstractArg x = go
@@ -112,7 +114,7 @@ abstractArg x = go
     go (ETyApp e1 e2)    = ETyApp (go e1) (go e2)
     go (EPi s' t1' t2')  = EPi s' t1' (go t2')
     go (EffTerm e)       = EffTerm (AbsEff (Src x) e)
-    go e                 = e
+    go e                 = EForAll x e
 
 -- SO BAD, PLEASE REFACTOR ME!!!
 freeEffTyVars :: EffTy -> [Symbol]                       

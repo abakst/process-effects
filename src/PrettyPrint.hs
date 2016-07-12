@@ -19,7 +19,7 @@ pretty = pprintPrec 0
 
 instance Pretty Binder where
   pprintPrec z (Src b) = pprintPrec z (symbol b)
-  pprintPrec z (Eff b) = pprintPrec z (symbol b) <> text "*"
+  pprintPrec z (Eff b) = pprintPrec z (symbol b)
 
 instance Pretty Fp.Symbol where
   pprintPrec _ s = text (symbolString s)
