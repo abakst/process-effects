@@ -252,11 +252,6 @@ lookupEff g e@(Var x)
                                                                     (EffVar me)))))
        else
          defaultEff (CoreUtils.exprType e)
-  -- = do t <- case M.lookup (getName x) g of
-  --             Nothing -> do
-  --               defaultEff (CoreUtils.exprType e)
-  --             Just e  -> return e
-
 
 bkFun :: Type -> Maybe ([TyVar], [Type], Type)
 bkFun t
