@@ -23,11 +23,13 @@ library
                      , EffectTypes
                      , Lex
                      , Parse
+                     , GHCInterface
                      , Language.Haskell.MessagePassing
   build-depends:       base >= 4.7 && < 5
                      , liquidhaskell
                      , liquid-fixpoint
                      , mtl
+                     , transformers
                      , pretty >= 1.1.2
                      , ghc
                      , containers

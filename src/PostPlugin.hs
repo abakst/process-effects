@@ -18,6 +18,7 @@ import Var
 import Type
 import DataCon
 import Name
+import OccName
 import CoreSyn
 import CoreUtils
 import Outputable
@@ -29,6 +30,7 @@ import Serialized
 import IdInfo
 import DynFlags
 
+import GHCInterface
 import EffectTypes  
 import PrettyPrint
 import Parse
@@ -53,9 +55,30 @@ lhplug = PostPlugin { P.name   = "gloob(ic) v 2"
                     , P.plugin = DoPostStep doEffects
                     }
 
+doEffects :: AnnInfo SpecType -> ReaderT PluginEnv IO ()
+doEffects (AI m)
+  = do core <- reader P.cbs
+       hsenv <- env <$> reader ghcInfo
+       emb <- reader embed
+       liftIO $ do
+         setUnsafeGlobalDynFlags (extractDynFlags hsenv)
+         annenv <- prepareAnnotations hsenv Nothing
+         evalStateT (synthEffects M.empty core) EffState { ctr = 0
+                                                         , annots = m'
+                                                         , annenv = annenv
+                                                         , tyconEmb = emb
+                                                         , esubst = []
+                                                         , tsubst = []
+                                                         , hsenv = hsenv
+                                                         }
+  where
+    m' = (snd <$>) <$> m
+
+
 data EffState = EffState {
     ctr :: Int
   , annots :: H.HashMap SrcSpan [SpecType]
+  , hsenv :: HscEnv
   , annenv :: AnnEnv
   , tyconEmb :: TCEmb TyCon
   , tsubst :: [(Symbol, EffTy)]
@@ -174,24 +197,6 @@ thenEffectTy = ETermAbs e0Sym
 
 withCC = ETermAbs (symbol "K")           
 
-doEffects :: AnnInfo SpecType -> ReaderT PluginEnv IO ()
-doEffects (AI m)
-  = do core <- reader P.cbs
-       hsenv <- env <$> reader ghcInfo
-       emb <- reader embed
-       liftIO $ do
-         setUnsafeGlobalDynFlags (extractDynFlags hsenv)
-         annenv <- prepareAnnotations hsenv Nothing
-         evalStateT (synthEffects M.empty core) EffState { ctr = 0
-                                                         , annots = m'
-                                                         , annenv = annenv
-                                                         , tyconEmb = emb
-                                                         , esubst = []
-                                                         , tsubst = []
-                                                         }
-  where
-    m' = (snd <$>) <$> m
-
 lookupAnn :: Id -> EffectM [String]
 lookupAnn v
   = do e <- gets annenv
@@ -236,11 +241,22 @@ lookupEff g e@(Var x)
                       RecSelId {} -> True
                       _           -> False
 lookupEff g e@(Var x)
-  = do t <- case M.lookup (getName x) g of
-              Nothing -> do
-                defaultEff (CoreUtils.exprType e)
-              Just e  -> return e
-       return t
+  | getName x `M.member` g
+  = fromJust <$> return (M.lookup (getName x) g)
+  | otherwise
+  = do env      <- gets hsenv
+       patError <- ghcVarName env "Control.Exception.Base" "patError"
+       if getName x == patError then
+         return $ EPi (symbol "_") noEff (EffTerm (AbsEff (Src (symbol "_"))
+                                                  (effBindF (AppEff (EffVar (Src (symbol "die")))
+                                                                    (EffVar me)))))
+       else
+         defaultEff (CoreUtils.exprType e)
+  -- = do t <- case M.lookup (getName x) g of
+  --             Nothing -> do
+  --               defaultEff (CoreUtils.exprType e)
+  --             Just e  -> return e
+
 
 bkFun :: Type -> Maybe ([TyVar], [Type], Type)
 bkFun t
@@ -332,7 +348,7 @@ isEffectType t
 
 synthEff :: EffEnv -> CoreExpr -> EffectM(EffTy)
 synthEff g e@(Var x)
-  = do as <- lookupAnn x
+  = do as  <- lookupAnn x
        eff <- consult as
        freshFnEff eff {- >>= dbgTy "synthEff: Var" -}
        -- liftIO $ putStrLn (show as)
