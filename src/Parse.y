@@ -40,12 +40,13 @@ effty : '{' '}'                   { EffTerm (EffLit "0") }
       | 'forall' EVAR '.' effty   { ETermAbs (symbol $2) $4 }
       | effty '->' effty          { EPi (symbol "_") $1 $3 }
 
-effTerm : '\\' effVar '.' effTerm    { AbsEff $2 $4 }
-        | '[' VAR ']' effTerm        { Nu (symbol $2) $4 }
-        | effTerm '>>=' effTerm      { Bind $1 $3 }
-        | effTerm '|' effTerm        { Par $1 $3 }
-        | effTerm simpleTerm         { AppEff $1 $2 }
-        | simpleTerm                 { $1 }
+effTerm : '\\' effVar '.' effTerm       { AbsEff $2 $4 }
+        | '[' VAR ']' effTerm           { Nu (symbol $2) $4 }
+        | '[' VAR ':' VAR ']' effTerm   { Nu (symbol $2) $6 }
+        | effTerm '>>=' effTerm         { Bind $1 $3 }
+        | effTerm '|' effTerm           { Par $1 $3 }
+        | effTerm simpleTerm            { AppEff $1 $2 }
+        | simpleTerm                    { $1 }
 
 simpleTerm : effVar                  { EffVar $1 }
            | '(' effTerm ')'         { $2 }

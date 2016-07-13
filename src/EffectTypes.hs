@@ -37,8 +37,9 @@ data Effect = EffLit String
             | Bind Effect Effect
             | NonDet [Effect]
             | Nu Symbol Effect
+            | Mu Symbol Effect
             | Par Effect Effect
-            | Assume Symbol (Symbol, [Symbol]) Effect
+            | Assume Symbol SpecType (Symbol, [Symbol]) Effect
             | Pend Effect (Symbol, SpecType)
               deriving Show
 
@@ -75,35 +76,36 @@ betaReduce (Bind e1 e2)
   = Bind (betaReduce e1) (betaReduce e2)
 betaReduce (AbsEff s e)
   = AbsEff s (betaReduce e)
+betaReduce (Mu s e)
+  = Mu s (betaReduce e)
 betaReduce (AppEff e1 e2)
-  = let e2' = betaReduce e2 in
-    case betaReduce e1 of
-      AbsEff (Eff s) m -> betaReduce $ sub [(s, e2')] m
-      AbsEff (Src s) m -> betaReduce $ sub [(s, e2')] m
-      -- AbsEff (Src s) x -> Pend (betaReduce $ sub [(s, e2')] m) xt
-      -- e1' -> error (printf "%s %s" (printEffTerm e1') (printEffTerm e2')) -- AppEff e1' e2'
-      -- e1'@(AbsEff (Eff s) m) ->
-      --   betaReduce $ sub [(s, e2')] m
-      -- e1'@(AbsEff (Src s) m) ->
-      --   case e2' of
-      --     Pend (EffVar (Src v)) (x,t) ->
-      --       betaReduce $ Pend (sub [(s, v)] m) (x,t)
-      --     EffVar (Src v) ->
-      --       betaReduce $ sub [(s, v)] m
-      e1' -> AppEff e1' e2'
+  = case (betaReduce e1, betaReduce e2) of
+      (AbsEff (Eff s) m, n) ->
+        betaReduce $ sub [(s, n)] m
+
+      (AbsEff (Src s) m, EffVar (Src s')) ->
+        betaReduce $ sub [(s, s')] m
+
+      (AbsEff (Src s) m, n) ->
+        betaReduce $ sub [(s, n)] m
+
+      (e1', e2') -> AppEff e1' e2'
 betaReduce (Pend e xt) = Pend (betaReduce e) xt
-betaReduce (Assume s (c,bs) e) = Assume s (c,bs) (betaReduce e)
+betaReduce (Assume s t (c,bs) e) = Assume s t (c,bs) (betaReduce e)
 betaReduce e = e
 
 
-applyArg :: Symbol -> EffTy -> EffTy
-applyArg x = go
+applyArg :: Symbol -> Maybe SpecType -> EffTy -> EffTy
+applyArg x mt = go
   where
     go EffNone           = EffNone
     go (EForAll x' t)    = t -- WRONG
     go (ETyApp e1 e2)    = ETyApp (go e1) (go e2)
     go (EPi s' t1' t2')  = EPi s' t1' (go t2')
-    go (EffTerm e)       = EffTerm (betaReduce $ AppEff e (EffVar (Src x)))
+    go (EffTerm e)       = EffTerm (betaReduce $ AppEff e m)
+      where
+        m = maybe v (\t -> Pend v (x,t)) mt
+        v = EffVar (Src x)
     go e = e
 
 abstractArg :: Symbol -> EffTy -> EffTy
@@ -145,7 +147,7 @@ freeEffTermVars (EffTerm e)
     go (NonDet es)         = nub (concatMap go es)
     go (Nu s e)            = go e
     go (Par e1 e2)         = collect go e1 e2
-    go (Assume _ _ e)      = go e
+    go (Assume _ _ _ e)    = go e
     go (Pend e _)          = go e
     go (EffVar (Eff x))    = [x]
     go _                   = []
@@ -288,7 +290,10 @@ genericSubst f g h = goTerm
       = Bind (goTerm su m) (goTerm su f)
     goTerm su (Par p q)
       = Par (goTerm su p) (goTerm su q)
-    goTerm su (Assume s (c, bs) e)
-      = Assume (g s) (c, bs) (goTerm su e)
+    goTerm su (Assume s t (c, bs) e)
+      = Assume (g s) t' (c, bs) (goTerm su e)
+        where (_,t') = h (s,t)
     goTerm su (Pend e i)
       = Pend (goTerm su e) (h i)
+    goTerm su (Mu s e)
+      = Mu (g s) (goTerm (restrict su (symbol s)) e)

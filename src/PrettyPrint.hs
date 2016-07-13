@@ -24,30 +24,31 @@ instance Pretty Binder where
 instance Pretty Fp.Symbol where
   pprintPrec _ s = text (symbolString s)
 
+maybeAnnot :: (Fp.Symbol, Rt.SpecType) -> Doc -> Doc                   
+maybeAnnot (x,t) d
+  = if not $ Fp.isTautoPred p then
+      d <+> parens (text "where" <+>
+                         Fp.pprint (Fp.subst1 p (vv, Fp.expr (symbol x))))
+     else
+       d
+  where
+    Fp.Reft (vv, p) = Rt.rTypeReft t
+
 instance Pretty Effect where
   pprintPrec z (EffLit s)
     = text s
   pprintPrec z (EffVar v)
     = text (symbolString (symbol v))
   pprintPrec z (Pend e (x,t))
-    = pprintPrec z e <+>
-        if not $ Fp.isTautoPred p then
-          parens (
-                  text "where" <+> 
-                       Fp.pprint (Fp.subst1 p (vv, Fp.expr (symbol x)))
-                 )
-        else
-          empty
-    where
-      Fp.Reft (vv, p) = Rt.rTypeReft t
+    = maybeAnnot (x,t) (pprintPrec z e)
   pprintPrec z (NonDet es)
     = parensIf (z > za) $
       hcat (punctuate (text " □ ") (pprintPrec (za+1) <$> es))
     where
       za = 2
-  pprintPrec z (Assume s (c,bs) e)
+  pprintPrec z (Assume s t (c,bs) e)
     = parensIf (z > za) $
-      text "case" <+> pprintPrec 0 s <+> text "of" <+>
+      text "case" <+> maybeAnnot (s,t) (pprintPrec 0 s) <+> text "of" <+>
            parens (pprintPrec 0 c <+> hsep (pprintPrec 0 <$> bs)) <+> text "->"
       <+> pprintPrec (za+1) e 
     where
@@ -67,6 +68,11 @@ instance Pretty Effect where
       parens (text "ν" <+> pprintPrec z b) <> pprintPrec (za + 1) e
     where
       za = 7
+  pprintPrec z (Mu b e)
+    = parensIf (z > za) $
+      text "μ" <> pprintPrec z b <> text "." <+> pprintPrec (za + 1) e
+    where
+      za = 3
   pprintPrec z (Bind e1 e2)
     = parensIf (z > za)
         (pprintPrec (za + 1) e1 <+>
