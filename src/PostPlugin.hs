@@ -154,6 +154,8 @@ withPid = absEff me
 absEff x e = AbsEff x e          
 
 effBindF = callCC . withPid             
+returnEffectTy x 
+  = EPi x noEff $ EffTerm (AbsEff (Src x) (effBindF (AppEff (AppEff (EffVar kont) (EffVar (Src x))) (EffVar me))))
 
 bindEffectTy x
   = ETermAbs e0Sym
@@ -225,12 +227,11 @@ synth1Effect g (NonRec b e)
        return (M.insert (getName b) (generalizeEff g' egen) g')
 
 synth1Effect g (Rec [(b,e)])              
-  = do tv <- freshEffTyVar
-       let g' = M.insert (getName b) tv g
-       et <- applySubstM =<< synthEff g' e
-       betaReduceTy <$> applySubstM et
-       applySubstM tv
-       error "adsfl"
+  = do et1 <- defaultEff (CoreUtils.exprType e)
+       et2 <- synthEff (M.insert (getName b) et1 g) e
+       et  <- unifyTysM et1 et2
+       liftIO $ putStrLn (printf "%s : %s" (getOccString b) (printEff $ betaReduceTy et))
+       return (M.insert (getName b) et g)
 
 lookupEff :: EffEnv -> CoreExpr -> EffectM EffTy
 lookupEff g e@(Var x)
@@ -360,6 +361,9 @@ synthEff g (App e@(Var f) (Type x))
       | isEffect &&
         getName f == bindMName
       = bindEffectTy <$> freshTermVar
+      | isEffect &&
+        getName f == returnMName
+      = returnEffectTy <$> freshTermVar
       | isEffect &&
         getName f == thenMName
       = return $ thenEffectTy
