@@ -10,11 +10,11 @@ maintainer:          example@example.com
 copyright:           2016 Author name here
 category:            Web
 build-type:          Simple
-extra-source-files:  src/Language/Haskell/MessagePassing/Lex.x
-                   , src/Language/Haskell/MessagePassing/Parse.y
+extra-source-files:  src/Controll/Process/MessagePassing/Lex.x
+                   , src/Controll/Process/MessagePassing/Parse.y
 cabal-version:       >=1.10
 
-data-files : include/Language/Haskell/*.spec                     
+data-files : include/Control/Process/*.spec                     
 
 library
   hs-source-dirs:      src
