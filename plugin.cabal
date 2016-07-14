@@ -18,16 +18,16 @@ data-files : include/Language/Haskell/*.spec
 
 library
   hs-source-dirs:      src
-  exposed-modules:     Language.Haskell.MessagePassing.PostPlugin
-                     , Language.Haskell.MessagePassing.Effects
-                     , Language.Haskell.MessagePassing.EffEnv
-                     , Language.Haskell.MessagePassing.Builtins
-                     , Language.Haskell.MessagePassing.PrettyPrint
-                     , Language.Haskell.MessagePassing.EffectTypes
-                     , Language.Haskell.MessagePassing.Lex
-                     , Language.Haskell.MessagePassing.Parse
-                     , Language.Haskell.MessagePassing.GHCInterface
-                     , Language.Haskell.MessagePassing
+  exposed-modules:     Control.Process.MessagePassing.PostPlugin
+                     , Control.Process.MessagePassing.Effects
+                     , Control.Process.MessagePassing.EffEnv
+                     , Control.Process.MessagePassing.Builtins
+                     , Control.Process.MessagePassing.PrettyPrint
+                     , Control.Process.MessagePassing.EffectTypes
+                     , Control.Process.MessagePassing.Lex
+                     , Control.Process.MessagePassing.Parse
+                     , Control.Process.MessagePassing.GHCInterface
+                     , Control.Process.MessagePassing
   build-depends:       base >= 4.7 && < 5
                      , liquidhaskell
                      , liquid-fixpoint

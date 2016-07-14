@@ -1,9 +1,9 @@
-{-@ LIQUID "--plugin=Language.Haskell.MessagePassing.PostPlugin" @-}
+{-@ LIQUID "--plugin=Control.Process.MessagePassing.PostPlugin" @-}
 {-@ LIQUID "--no-termination" @-}
 {-@ LIQUID "--no-eliminate" @-}
 {-@ LIQUID "--exactdc" @-}
 module Cases ( pongProc, Message(..) ) where
-import Language.Haskell.MessagePassing
+import Control.Process.MessagePassing
 
 data Message = Ping Pid
              | Pong Pid
