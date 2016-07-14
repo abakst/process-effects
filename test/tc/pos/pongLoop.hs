@@ -17,6 +17,5 @@ pongProc = do  myPid <- getSelfPid
     loop p = do
       msg <- recv
       case msg of
-        Pong q -> do
-                 send q (Ping { ping = p })
-                 loop p
+        Pong q ->
+          do send q (Ping { ping = p }) >> loop p

@@ -154,9 +154,11 @@ withPid = absEff me
 absEff x e = AbsEff x e          
 
 effBindF = callCC . withPid             
+returnEffectTy :: Symbol -> EffTy
 returnEffectTy x 
   = EPi x noEff $ EffTerm (AbsEff (Src x) (effBindF (AppEff (AppEff (EffVar kont) (EffVar (Src x))) (EffVar me))))
 
+bindEffectTy :: Symbol -> EffTy
 bindEffectTy x
   = ETermAbs e0Sym
              $ ETermAbs e1Sym
@@ -181,6 +183,7 @@ bindEffectTy x
     e1Sym = symbol "e1"
     xSym = symbol "x"
 
+thenEffectTy :: EffTy
 thenEffectTy = ETermAbs e0Sym
              $ ETermAbs e1Sym
              $ EPi fSym (EffTerm (EffVar (Eff e0Sym)))

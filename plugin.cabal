@@ -18,12 +18,13 @@ data-files : include/Language/Haskell/*.spec
 
 library
   hs-source-dirs:      src
-  exposed-modules:     PostPlugin
-                     , PrettyPrint
-                     , EffectTypes
-                     , Lex
-                     , Parse
-                     , GHCInterface
+  exposed-modules:     Language.Haskell.MessagePassing.Effects
+                     , Language.Haskell.MessagePassing.PostPlugin
+                     , Language.Haskell.MessagePassing.PrettyPrint
+                     , Language.Haskell.MessagePassing.EffectTypes
+                     , Language.Haskell.MessagePassing.Lex
+                     , Language.Haskell.MessagePassing.Parse
+                     , Language.Haskell.MessagePassing.GHCInterface
                      , Language.Haskell.MessagePassing
   build-depends:       base >= 4.7 && < 5
                      , liquidhaskell
