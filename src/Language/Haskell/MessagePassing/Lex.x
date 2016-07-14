@@ -1,6 +1,6 @@
 {
 {-# Language FlexibleContexts #-}
-module Lex (
+module Language.Haskell.MessagePassing.Lex (
   Token(..),
   scanTokens
 )  where

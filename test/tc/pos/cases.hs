@@ -1,4 +1,4 @@
-{-@ LIQUID "--plugin=PostPlugin" @-}
+{-@ LIQUID "--plugin=Language.Haskell.MessagePassing.PostPlugin" @-}
 {-@ LIQUID "--no-termination" @-}
 {-@ LIQUID "--no-eliminate" @-}
 {-@ LIQUID "--exactdc" @-}

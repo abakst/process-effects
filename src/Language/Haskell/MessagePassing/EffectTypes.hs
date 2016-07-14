@@ -1,29 +1,41 @@
 {-# Language MultiParamTypeClasses #-}
 {-# Language FlexibleInstances #-}
-module EffectTypes ( Binder(..)
-                   , Effect(..)
-                   , EffTy(..)
-                   , EffectSubst(..)
-                   , Info(..)
-                   , betaReduceTy
-                   , betaReduce
-                   , applyArg, abstractArg
-                   , freeEffTyVars
-                   , freeEffTermVars
-                   , symbolString
-                   , symbol
-                   , dom
-                   , catSubst
-                   ) where
+module Language.Haskell.MessagePassing.EffectTypes (
+    Binder(..)
+  , Effect(..)
+  , EffectM(..)
+  , EffState(..)
+  , EffTy(..)
+  , EffectSubst(..)
+  , Info(..)
+  , betaReduceTy
+  , betaReduce
+  , applyArg, abstractArg
+  , freeEffTyVars
+  , freeEffTermVars
+  , symbolString
+  , symbol
+  , dom
+  , catSubst
+  , Symbol(..)
+  , freshInt, freshTermVar, freshEffVar, freshChanVar, freshEffTyVar
+  , gets, modify
+  ) where
 
 import Debug.Trace
 
-import Var
-import Data.Function
-import Data.List
-import Language.Haskell.Liquid.Types
-import Language.Haskell.Liquid.Types.RefType
-import Language.Fixpoint.Types hiding (SrcSpan(..), ECon, filterSubst, catSubst) 
+import           Var
+import           GHC
+import           Annotations
+import           Data.Function
+import           Data.List
+import qualified Data.HashMap.Strict as H
+import           Control.Monad.Reader
+import           Control.Monad.State
+
+import           Language.Haskell.Liquid.Types
+import           Language.Haskell.Liquid.Types.RefType
+import           Language.Fixpoint.Types hiding (SrcSpan(..), ECon, filterSubst, catSubst) 
   
 debug s x = trace (s ++ ": " ++ show x) x  
 data Binder = Src Symbol
@@ -52,6 +64,36 @@ data EffTy  = EPi Symbol EffTy EffTy
             | EffNone
               deriving Show
 
+data EffState = EffState {
+    ctr      :: Int
+  , annots   :: H.HashMap SrcSpan [SpecType]
+  , hsenv    :: HscEnv
+  , annenv   :: AnnEnv
+  , tyconEmb :: TCEmb TyCon
+  , tsubst   :: [(Symbol, EffTy)]
+  , esubst   :: [(Symbol, Effect)]
+  }
+type EffectM a = StateT EffState IO a
+
+freshInt :: EffectM Int
+freshInt =
+  do n <- gets ctr
+     modify $ \s -> s { ctr = n + 1}
+     return n
+freshEffVar =
+  do n <- freshInt
+     return (symbol ("η" ++ show n))
+freshTermVar
+  = do n <- freshInt
+       return (symbol ("x" ++ show n))
+freshChanVar
+  = do n <- freshInt
+       return (symbol ("p" ++ show n))
+freshEffTyVar
+  = do n <- freshInt
+       return (ETyVar (symbol ("E" ++ show n)))
+
+betaReduceTy :: EffTy -> EffTy
 betaReduceTy (EPi s e1 e2)
   = EPi s (betaReduceTy e1) (betaReduceTy e2)
 betaReduceTy (ETermAbs s e)

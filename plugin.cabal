@@ -10,16 +10,18 @@ maintainer:          example@example.com
 copyright:           2016 Author name here
 category:            Web
 build-type:          Simple
-extra-source-files: src/Lex.x
-                  , src/Parse.y
+extra-source-files:  src/Language/Haskell/MessagePassing/Lex.x
+                   , src/Language/Haskell/MessagePassing/Parse.y
 cabal-version:       >=1.10
 
 data-files : include/Language/Haskell/*.spec                     
 
 library
   hs-source-dirs:      src
-  exposed-modules:     Language.Haskell.MessagePassing.Effects
-                     , Language.Haskell.MessagePassing.PostPlugin
+  exposed-modules:     Language.Haskell.MessagePassing.PostPlugin
+                     , Language.Haskell.MessagePassing.Effects
+                     , Language.Haskell.MessagePassing.EffEnv
+                     , Language.Haskell.MessagePassing.Builtins
                      , Language.Haskell.MessagePassing.PrettyPrint
                      , Language.Haskell.MessagePassing.EffectTypes
                      , Language.Haskell.MessagePassing.Lex

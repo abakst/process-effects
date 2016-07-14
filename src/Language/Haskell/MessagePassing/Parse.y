@@ -1,9 +1,9 @@
 {
-module Parse ( parseEffTy
+module Language.Haskell.MessagePassing.Parse ( parseEffTy
              , parseTokens
              ) where
-import Lex
-import EffectTypes
+import Language.Haskell.MessagePassing.Lex
+import Language.Haskell.MessagePassing.EffectTypes
 import Control.Monad.Except
 }
 

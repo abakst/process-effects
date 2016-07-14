@@ -1,6 +1,6 @@
-module PrettyPrint where
+module Language.Haskell.MessagePassing.PrettyPrint where
 
-import           EffectTypes
+import           Language.Haskell.MessagePassing.EffectTypes
 import           Text.PrettyPrint.HughesPJ hiding ((<$>))
 import qualified Language.Fixpoint.Types as Fp
 import qualified Language.Haskell.Liquid.Types as Rt
