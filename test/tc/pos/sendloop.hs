@@ -1,6 +1,6 @@
 {-# LANGUAGE DeriveAnyClass #-}
 module Foo where
-import Language.Haskell.MessagePassing
+import Control.Process.MessagePassing
 
 {-@ invariant {v:Int | validMsg v} @-}
 

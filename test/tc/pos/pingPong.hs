@@ -1,9 +1,12 @@
+{-@ LIQUID "--plugin=Control.Process.MessagePassing.PostPlugin" @-}
+{-@ LIQUID "--no-termination" @-}
+{-@ LIQUID "--no-eliminate" @-}
+{-@ LIQUID "--exactdc" @-}
 module PingPong ( main, Message(..) ) where
-import Language.Haskell.MessagePassing
+import Control.Process.MessagePassing
 
-data Message = Ping { ping :: Pid }
-             | Pong { pong :: Pid }
-{-@ data Message = Ping { ping :: Pid } | Pong { pong :: Pid } @-}
+data Message = Ping Pid
+             | Pong Pid
 
 instance RecvMsg Message where
 {-@ invariant {v:Message | validMsg v} @-}
@@ -16,12 +19,12 @@ pongProc = do
   msg   <- recv
   case msg of
     Ping q ->
-      send q (Pong { pong = myPid })
+      send q (Pong myPid)
 
 pingProc :: Pid -> Process ()
 pingProc p = do
   myPid <- getSelfPid
-  let pingMsg = Ping { ping = myPid }
+  let pingMsg = Ping myPid
   send p pingMsg
   msg   <- recv
   case msg of

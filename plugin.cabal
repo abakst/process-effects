@@ -22,6 +22,7 @@ library
                      , Control.Process.MessagePassing.Effects
                      , Control.Process.MessagePassing.EffEnv
                      , Control.Process.MessagePassing.Builtins
+                     , Control.Process.MessagePassing.Promela
                      , Control.Process.MessagePassing.PrettyPrint
                      , Control.Process.MessagePassing.EffectTypes
                      , Control.Process.MessagePassing.Lex
@@ -38,6 +39,7 @@ library
                      , containers
                      , unordered-containers
                      , array >= 0.5.1
+                     , syb
   build-tools:         alex, happy
   default-language:    Haskell2010
 
