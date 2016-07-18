@@ -165,6 +165,8 @@ instance Promela Fp.Symbol where
               . replace '#' '_'
               . replace '$' '_'
               . replace '\'' '_'
+              . replace '(' 't'
+              . replace ')' 't'
       replace x y c = if c == x then y else c
 
 data PState = PState {
@@ -209,6 +211,11 @@ promelaEffect e = do recCall <- maybeRecursiveCall e
       = return $ text "assert (0 == 1)"
     go _ (EffVar (Src f _))
       = return $ promela f
+    go _ (AppEff (EffVar (Eff f)) e)
+      = return $ maybe ret (\d -> d $+$ ret) d
+      where
+        ret = promela callerChan <> text "!!" <> promela x
+        (x, _, d) = promelaVal e
     go _ e = error (render $ text "promelaEffect:" <+> pretty e)
 
 argList :: [Fp.Symbol] -> Doc
@@ -345,7 +352,7 @@ promelaRecursiveCall f as vs x
        return (decls $+$ call $+$ wait $+$ retCall)
   where
     args = take (length as - 2) as
-    kont = head $ drop (length as - 2) as
+    kont = head $ drop (length as - 2) (trace (printf "***kont*** %s" (render $ pretty as)) as)
     retVal = unwrapRecursiveCont kont
     (retX, t, retDecl) = promelaVal retVal
 
@@ -401,7 +408,7 @@ maybeInfoVal x (maybeInt -> Just i)
 maybeInfoVal x (maybeExpr -> Just e)
   = Just $ (text "int" <+> promela x <+> equals <+> e <> semi)
 maybeInfoVal x _
-  = trace (render $ pretty x) $ Nothing
+  = Nothing
 
 eqpreds :: Fp.SortedReft -> [Fp.Expr]
 eqpreds (Fp.RR _ (Fp.Reft (vv,e)))
@@ -583,9 +590,13 @@ adtTyInfo (ty, _)
     name = symbol $ getName ty
 
 tyName :: Type -> Fp.Symbol
-tyName
-  = Fp.symbol . getName . tyConAppTyCon
-
+tyName (tyConAppTyCon_maybe -> Just tc)
+  = Fp.symbol . getName $ tc
+tyName x
+  | Just v <- getTyVar_maybe x
+  = Fp.symbol . getName $ v
+tyName x
+  = error "bloop"
 adtCInfo :: TyCon -> Fp.Symbol -> [CstrInfo]
 adtCInfo tc tn
   = go <$> tyConDataCons tc

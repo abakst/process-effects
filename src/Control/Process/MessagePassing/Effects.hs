@@ -315,7 +315,6 @@ generalizeEff g
         free = fvs L.\\ gvs
         fvs = f t
         gvs = nub (concatMap f $ M.elems g)
-    
 
 altEffect :: EffEnv -> CoreAlt -> EffectM (Symbol, [Symbol], EffTy)
 altEffect g (DataAlt dc, bs, e)
