@@ -7,6 +7,7 @@ import           Name
 import           TyCon
 import           DataCon
 import           Unique
+import           TysWiredIn
 import           PrelNames
 import           Control.Monad.State
 import           Text.Printf
@@ -80,10 +81,11 @@ promelaProgram n eff
     functions
       = promelaFunctions st
 
-    mtype  = declMtype tinfos
+    mtype  = declMtype allts
     types  = vcat $ declareType <$> tinfos
     cinfos = concatMap cinfo tinfos
-    tinfos = nub [t | t@TypeInfo {} <- tyInfos (snd <$> boundTys eff)]
+    allts  = nub (tyInfos (snd <$> boundTys eff))
+    tinfos = [t | t@TypeInfo {} <- allts]
     heaps  = vcat $ goHeap  <$> tinfos
     goHeap ti = heapDecl 10 (tyname ti)
     pidCtr = ptrType <+> promela pidCtrName
@@ -93,13 +95,18 @@ promelaProgram n eff
     numChans = n
     buf      = chanDecl n n
 
+bodyTemplate body
+  = nest 2 (ret $+$ body)
+    where
+      ret = text "chan _ret = [0] of { int };"
+
 promelaProcs :: PState -> Doc
 promelaProcs st
   = vcat (go <$> procs st)
   where
     go (name, args, body)
       = text "proctype" <+> procName name <+> formalsList args <+> text "{" $+$
-        nest 2 body $+$
+          bodyTemplate body $+$
         text "}"
 
 promelaFunctions :: PState -> Doc
@@ -109,14 +116,14 @@ promelaFunctions st
     template f args body
       = text "proctype" <+> promela f <+>
         funFormalsList (callerChan:args) <+> text "{" $+$
-        nest 2 body $+$
+          bodyTemplate body $+$
         text "}"
     go (x,f,as,vs,Just bdy)
       = template f (as ++ vs) bdy --empty -- undefined -- promelaRecursiveDef x f bdy
 
 initialProc d =
   text "active proctype master() {" $+$
-  nest 2 (text "int" <+> promela initialPid <+> text " = 0;" $+$ d) $+$
+  bodyTemplate (text "int" <+> promela initialPid <+> text " = 0;" $+$ d) $+$
   text "}"
 
 declMtype tinfos
@@ -212,7 +219,7 @@ promelaEffect e = do recCall <- maybeRecursiveCall e
       | symbolString f == "die"
       = return $ text "assert (0 == 1)"
     go _ (EffVar (Src f _))
-      = return $ promela f
+      = promelaVar f
     go _ (AppEff (EffVar (Eff f)) e)
       = return $ maybe ret (\d -> d $+$ ret) d
       where
@@ -332,7 +339,10 @@ promelaRecv p (x, Just t) e2
     decl = if symbolString x == "_" then empty else ptrType <+> promela x
     recv = text "mbuf" <> brackets (promela p) <>
            text "??" <> ty <> comma <> promela x
-    ty   = promela t
+    ty    = case tinfo of
+              PrimType { tyname = n } -> promela n <> text "_ty"
+              _                       -> promela t
+    tinfo = tyInfo t
 
 promelaSend :: Effect -> Effect -> PM Doc
 promelaSend p m
@@ -377,7 +387,11 @@ promelaRecursiveCall :: Fp.Symbol -> [Effect] -> [Fp.Symbol] -> PM Doc
 promelaRecursiveCall f as vs
   = do let (xs, mds) = unzip [(x,d) | (x,_,d) <- promelaVal <$> args ]
            call     = text "run" <+> promela f <+> argList (retChan : xs ++ vs) <> semi
-           wait     = ptrType <+> promela x <> semi $+$
+           waitDecl = if symbol x /= symbol "_" then
+                        ptrType <+> promela x <> semi
+                      else
+                        empty
+           wait     = waitDecl $+$
                       promela retChan <> text "??" <> promela x <> semi
            retCall  = promela callerChan <> text "!!" <> promela retX
            decls    = vcat $ catMaybes mds
@@ -394,6 +408,15 @@ unwrapRecursiveCont (AbsEff x (AppEff _ v)) = (x,v)
 unwrapRecursiveCont e = error (printf "unwrap: %s\n" (render $ pretty e))
 
 promelaVal :: Effect -> (Fp.Symbol, Type, Maybe Doc)
+promelaVal (EffVar (Src x _))
+  | x == Fp.symbol (dataConWorkId unitDataCon)
+  = (symbol "true", unitTy, Nothing)
+promelaVal (EffVar (Src x _))
+  | x == Fp.symbol (dataConWorkId trueDataCon)
+  = (symbol "true", unitTy, Nothing)
+promelaVal (EffVar (Src x _))
+  | x == Fp.symbol (dataConWorkId falseDataCon)
+  = (symbol "false", unitTy, Nothing)
 promelaVal (EffVar (Src x Nothing)) -- Variable lookup
   = (x, error (printf "uh oh needed a type %s" (Fp.symbolString x)), Nothing)
 promelaVal (EffVar (Src x (Just t))) -- Variable lookup
@@ -424,6 +447,11 @@ obj ty idx
 access :: Fp.Symbol -> Fp.Symbol -> Fp.Symbol -> Doc
 access ty idx fld
   = obj ty idx <> text "." <> promela fld
+
+promelaVar :: Fp.Symbol -> PM Doc
+promelaVar x
+  | x == Fp.symbol (dataConWorkId unitDataCon)
+  = return $ int 1
 
 maybeInfoVal :: Fp.Symbol -> Info -> Maybe Doc
 maybeInfoVal x (maybeCstrApp -> Just (cinfo, args))
@@ -624,9 +652,11 @@ primTyInfo (ty, _)
 adtTyInfo :: (TyCon, [Arg]) -> TypeInfo
 adtTyInfo (ty, _)
   | getUnique ty == boolTyConKey
-  = PrimType { tyname = symbol "bool" }
+  = PrimType { tyname = symbol ty }
   | getUnique ty == intTyConKey
-  = PrimType { tyname = symbol "int" }
+  = PrimType { tyname = symbol ty }
+  | ty == unitTyCon
+  = PrimType { tyname = symbol ty }
   | otherwise
   = TypeInfo { tyname = name
              , cinfo  = adtCInfo ty name
