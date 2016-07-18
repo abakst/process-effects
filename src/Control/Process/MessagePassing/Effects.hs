@@ -316,10 +316,10 @@ generalizeEff g
         fvs = f t
         gvs = nub (concatMap f $ M.elems g)
 
-altEffect :: EffEnv -> CoreAlt -> EffectM (Symbol, [Symbol], EffTy)
+altEffect :: EffEnv -> CoreAlt -> EffectM (DataCon, [Symbol], EffTy)
 altEffect g (DataAlt dc, bs, e)
   = do t <- synthEff g e
-       return (symbol (dataConWorkId dc), symbol <$> bs, t)
+       return (dc, symbol <$> bs, t)
 altEffect g (LitAlt _, _, e)
   = return $ (undefined, [], noEff)
 altEffect g (DEFAULT, _, _)

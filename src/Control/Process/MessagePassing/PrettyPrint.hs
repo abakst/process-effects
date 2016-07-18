@@ -1,5 +1,6 @@
 module Control.Process.MessagePassing.PrettyPrint where
 
+import           DataCon
 import           Control.Process.MessagePassing.EffectTypes
 import           Text.PrettyPrint.HughesPJ hiding ((<$>))
 import qualified Language.Fixpoint.Types as Fp
@@ -56,7 +57,7 @@ instance Pretty Effect where
   pprintPrec z (Assume i@(Info (s,_,_)) (c,bs) e)
     = parensIf (z > za) $
       text "case" <+> maybeAnnot i (pprintPrec 0 s) <+> text "of" <+>
-           parens (pprintPrec 0 c <+> hsep (pprintPrec 0 <$> bs)) <+> text "->"
+           parens (pprintPrec 0 (symbol (dataConName c)) <+> hsep (pprintPrec 0 <$> bs)) <+> text "->"
       <+> pprintPrec (za+1) e 
     where
       za = 2

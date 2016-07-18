@@ -54,7 +54,7 @@ data Effect = EffLit String
             | Nu Symbol Effect
             | Mu Symbol Effect
             | Par Effect Effect
-            | Assume Info (Symbol, [Symbol]) Effect
+            | Assume Info (DataCon, [Symbol]) Effect
             | Pend Effect Info
               deriving (Data)
 

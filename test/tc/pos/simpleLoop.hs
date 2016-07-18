@@ -7,6 +7,7 @@ import Control.Process.MessagePassing
 
 data PidList = Emp | PList Pid PidList
 {-@ invariant {v:Pid | validMsg v} @-}
+{-@ invariant {v:Int | validMsg v} @-}
 {-@ myPred :: x:Int -> {v:Int | v = x - 1} @-}
 myPred :: Int -> Int
 myPred x = x - 1
@@ -26,17 +27,23 @@ spawnLoop i
          let ret = PList x xs
          return ret
   | otherwise
-    = return Emp
+    = return emp
+  where
+    emp = Emp
 
 main :: Process Int
 main = do ps <- spawnLoop 3 
-          z  <- loop ps
+          z  <- sendLoop ps
           return 0
 
-loop :: PidList -> Process ()
-loop arg =
+{-@ zero :: {v:Int | v = 0} @-}
+zero :: Int
+zero = 0
+
+sendLoop :: PidList -> Process ()
+sendLoop arg =
   case arg of
-    Emp -> return ()
-    (PList x xs) -> do send x 0
-                       loop xs
-                       return ()
+    Emp        -> return ()
+    PList x xs -> do send x zero
+                     sendLoop xs
+                     return ()

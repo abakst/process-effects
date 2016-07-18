@@ -6,6 +6,8 @@ import           Type
 import           Name
 import           TyCon
 import           DataCon
+import           Unique
+import           PrelNames
 import           Control.Monad.State
 import           Text.Printf
 import           Data.List
@@ -81,7 +83,7 @@ promelaProgram n eff
     mtype  = declMtype tinfos
     types  = vcat $ declareType <$> tinfos
     cinfos = concatMap cinfo tinfos
-    tinfos = nub (tyInfos (snd <$> boundTys eff))
+    tinfos = nub [t | t@TypeInfo {} <- tyInfos (snd <$> boundTys eff)]
     heaps  = vcat $ goHeap  <$> tinfos
     goHeap ti = heapDecl 10 (tyname ti)
     pidCtr = ptrType <+> promela pidCtrName
@@ -191,7 +193,7 @@ promelaEffect e = do recCall <- maybeRecursiveCall e
                      go recCall e
   where
     go (Just (f, as, vs)) _
-      = promelaRecursiveCall f as vs (Fp.symbol "_")
+      = promelaRecursiveCall f as vs
     go _ (maybeSend -> Just (p,m))
       = promelaSend p m
     go _ (maybeRecursive -> Just (x, bdy, (fs,as), k, me))
@@ -243,15 +245,23 @@ promelaNonDet es
     go e = do vs <- gets vars
               d <- promelaEffect e
               modify $ \s -> s { vars = vs }
-              return (text "::" <+> braces d)
+              return (text "::" <+> d)
 
+promelaAssume i@(Info (x,ty,reft)) (c,ys) e
+  | PrimType {tyname = t} <- tyInfo ty,
+    (Just d) <- maybeCompare i
+  = do e' <- promelaEffect e
+       let x = if getUnique c == trueDataConKey
+               then d else text "!" <> parens d
+       return $ x <+> text "->" <+> braces e'
 promelaAssume (Info (x,ty,reft)) (c,ys) e
   = do modify $ \s -> s { vars = ys ++ vars s }
        d <- promelaEffect e
        return $ assm $+$ nest 2 (braces (decls $+$ d))
   where
-    tag         = int . ctag $ fromMaybe err (cstrFor c ty)
-    err         = error $ (printf "*****\nCan't find info for %s\n*****" (symbolString c))
+    dcname      = symbol (dataConWorkId c)
+    tag         = int . ctag $ fromMaybe err (cstrFor dcname ty)
+    err         = error $ (printf "*****\nCan't find info for %s\n*****" (symbolString dcname))
     decls       = vcat (decl <$> (zip [0..] ys))
     assm        = obj t x <> text ".tag" <+> equals <> equals <+> tag <+> text "->"
     decl (i, y) = ptrType <+> promela y <+>
@@ -259,12 +269,33 @@ promelaAssume (Info (x,ty,reft)) (c,ys) e
                   obj t x <> (text ".c" <> tag <> brackets (int i)) <> semi
     t           = tyname (tyInfo ty)
 
+maybeCompare :: Info -> Maybe Doc
+maybeCompare (Info (x,ty,reft@(Fp.RR _ (Fp.Reft(vv,_)))))
+  = case extractPropPreds go reft of
+      c:_ -> Just c
+      _   -> Nothing
+  where
+    go (Fp.PAtom o e1 e2) = do e1' <- go e1
+                               e2' <- go e2
+                               o'  <- goOp o
+                               return $ parens (e1' <+> o' <+> e2')
+    go (Fp.EVar x)        = Just $ promela x
+    go (Fp.ECon (Fp.I i)) = Just $ int (fromInteger i)
+    go _ = Nothing
+    goOp (Fp.Eq) = Just $ equals <> equals
+    goOp (Fp.Ne) = Just $ text "!" <> equals
+    goOp (Fp.Gt) = Just $ text ">"
+    goOp (Fp.Lt) = Just $ text "<"
+    goOp (Fp.Ge) = Just $ text ">="
+    goOp (Fp.Le) = Just $ text "<="
+    goOp _ = Nothing
+
 promelaNu :: Fp.Symbol -> Effect -> Effect -> PM Doc
 promelaNu c e1 e2
   = do vs <- gets vars
        let args = c : vs
        modify $ \s -> s { vars = args }
-       p <- promelaEffect (debugEff "NU" e1)
+       p <- promelaEffect e1
        modify $ \s -> s { vars = args }
        d <- promelaEffect e2
        modify $ \s -> s { vars = args
@@ -342,22 +373,24 @@ promelaRecursiveDef x bdy xs vs
     dropArgs (AbsEff _ e) = dropArgs e
     dropArgs e            = e
 
-promelaRecursiveCall :: Fp.Symbol -> [Effect] -> [Fp.Symbol] -> Fp.Symbol -> PM Doc
-promelaRecursiveCall f as vs x
+promelaRecursiveCall :: Fp.Symbol -> [Effect] -> [Fp.Symbol] -> PM Doc
+promelaRecursiveCall f as vs
   = do let (xs, mds) = unzip [(x,d) | (x,_,d) <- promelaVal <$> args ]
            call     = text "run" <+> promela f <+> argList (retChan : xs ++ vs) <> semi
-           wait     = promela retChan <> text "??" <> promela x <> semi
+           wait     = ptrType <+> promela x <> semi $+$
+                      promela retChan <> text "??" <> promela x <> semi
            retCall  = promela callerChan <> text "!!" <> promela retX
            decls    = vcat $ catMaybes mds
-       return (decls $+$ call $+$ wait $+$ retCall)
+           returns  = maybe retCall (\d -> d $+$ retCall) mretDecl
+       return (decls $+$ call $+$ wait $+$ returns)
   where
     args = take (length as - 2) as
     kont = head $ drop (length as - 2) (trace (printf "***kont*** %s" (render $ pretty as)) as)
-    retVal = unwrapRecursiveCont kont
-    (retX, t, retDecl) = promelaVal retVal
+    (Src x _,retVal)    = unwrapRecursiveCont kont
+    (retX, t, mretDecl) = promelaVal retVal
 
-unwrapRecursiveCont (AbsEff _ (AppEff (AppEff _ v) _)) = v
-unwrapRecursiveCont (AbsEff _ (AppEff _ v)) = v
+unwrapRecursiveCont (AbsEff x (AppEff (AppEff _ v) _)) = (x,v)
+unwrapRecursiveCont (AbsEff x (AppEff _ v)) = (x,v)
 unwrapRecursiveCont e = error (printf "unwrap: %s\n" (render $ pretty e))
 
 promelaVal :: Effect -> (Fp.Symbol, Type, Maybe Doc)
@@ -414,9 +447,15 @@ eqpreds :: Fp.SortedReft -> [Fp.Expr]
 eqpreds (Fp.RR _ (Fp.Reft (vv,e)))
   = [ e' | (Fp.PAtom Fp.Eq (Fp.EVar vv) e') <- Fp.conjuncts e ]
 
+propPreds :: Fp.SortedReft -> [Fp.Expr]
+propPreds (Fp.RR _ (Fp.Reft (vv,e)))
+  = [ e' | (Fp.PIff x e') <- Fp.conjuncts e, x == Fp.eProp vv ]
+
 extractPreds :: (Fp.Expr -> Maybe a) -> Fp.SortedReft -> [a]
 extractPreds f e
   = catMaybes (f <$> eqpreds e)
+extractPropPreds f e
+  = catMaybes (f <$> propPreds e)
 
 maybeExpr :: Info -> Maybe Doc
 maybeExpr (Info (x,ty,reft))
@@ -436,7 +475,6 @@ maybeExpr (Info (x,ty,reft))
     goOp Fp.Plus  = Just $ text "+"
     goOp Fp.Minus = Just $ text "-"
     goOp _ = Nothing
-
 maybeInt :: Info -> Maybe Int
 maybeInt (Info (x,ty,reft))
   = case extractPreds go reft of
@@ -513,7 +551,7 @@ isRecv _
   = False
 
 declareType :: TypeInfo -> Doc
-declareType ty
+declareType ty@TypeInfo{}
   = text "typedef" <+> name $+$ braces body
   where
     name  = promela (tyname ty)
@@ -553,10 +591,12 @@ argName s i = text "arg_" <> int i
 instance Promela Type where
   promela ty = promela (tyName ty) <> text "_ty"
 
-data TypeInfo = TypeInfo {
-    tyname :: Fp.Symbol
-  , cinfo  :: [CstrInfo]
-  } deriving (Eq, Show)
+data TypeInfo = TypeInfo { tyname :: Fp.Symbol
+                         , cinfo  :: [CstrInfo]
+                         }
+              | PrimType { tyname :: Fp.Symbol }
+ deriving (Eq, Show)
+
 
 data CstrInfo = CstrInfo {
     ctype :: Fp.Symbol
@@ -570,12 +610,12 @@ type ADT    = Type
 type Arg    = Type
 
 cstrFor :: Fp.Symbol -> Type -> Maybe CstrInfo
-cstrFor f ty
+cstrFor f (tyInfo -> tinfo@TypeInfo{})
   = case [ ci | ci <- cinfo tinfo, cname ci == f ] of
       [ci] -> Just ci
       []   -> Nothing
-  where
-    tinfo = tyInfo ty
+cstrFor _ _
+  = Nothing
 
 primTyInfo :: (TyCon, [Arg]) -> TypeInfo
 primTyInfo (ty, _)
@@ -583,6 +623,11 @@ primTyInfo (ty, _)
 
 adtTyInfo :: (TyCon, [Arg]) -> TypeInfo
 adtTyInfo (ty, _)
+  | getUnique ty == boolTyConKey
+  = PrimType { tyname = symbol "bool" }
+  | getUnique ty == intTyConKey
+  = PrimType { tyname = symbol "int" }
+  | otherwise
   = TypeInfo { tyname = name
              , cinfo  = adtCInfo ty name
              }
