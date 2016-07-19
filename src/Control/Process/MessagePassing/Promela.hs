@@ -21,6 +21,9 @@ import           Text.PrettyPrint.HughesPJ hiding ((<$>))
 import           Control.Process.MessagePassing.EffectTypes
 import           Control.Process.MessagePassing.PrettyPrint
 
+tracepp :: Pretty a => String -> a -> a
+tracepp msg x = trace (msg ++ " " ++ render (pretty x)) x
+
 debug :: Show a => String -> a -> a
 debug msg x = trace (msg ++ ": " ++ show x) x
 
@@ -38,7 +41,7 @@ instance Promela EffTy where
         debugEff "closed"  $
         betaReduce
           (AppEff (AppEff e doneEff) (EffVar (Src (symbol "_init") Nothing)))
-      doneEff = AbsEff (Src (symbol "_") Nothing) (AppEff (EffVar (Src (symbol "done") Nothing)) (EffVar (Src (symbol "_init") Nothing)))
+      doneEff = AbsEff (Src (symbol "_done") Nothing) (AppEff (EffVar (Src (symbol "done") Nothing)) (EffVar (Src (symbol "_init") Nothing)))
   promela _
     = error "I only know how to convert values of type { λK.λme.x }!"
 
@@ -119,7 +122,7 @@ promelaFunctions st
           bodyTemplate body $+$
         text "}"
     go (x,f,as,vs,Just bdy)
-      = template f (as ++ vs) bdy --empty -- undefined -- promelaRecursiveDef x f bdy
+      = template f (as ++ vs) bdy
 
 initialProc d =
   text "active proctype master() {" $+$
@@ -204,7 +207,7 @@ promelaEffect e = do recCall <- maybeRecursiveCall e
     go _ (maybeSend -> Just (p,m))
       = promelaSend p m
     go _ (maybeRecursive -> Just (x, bdy, (fs,as), k, me))
-      = promelaRecursive x bdy (fs,as) k me
+      = promelaRecursive x (tracepp "BODY" bdy) (fs,as) k me
     go _ (Nu x (Par e1 e2))
       = promelaNu x e1 e2
     go _ (Bind m (AbsEff (Src x t) n))
@@ -242,6 +245,8 @@ funFormalsList (c:cs)
     chan = text "chan" <+> promela callerChan
     go s = ptrType <+> promela s
 
+validVars = filter (\v -> symbolString v /= "_")
+
 promelaNonDet es
   = do ds <- mapM go es
        return $
@@ -262,7 +267,7 @@ promelaAssume i@(Info (x,ty,reft)) (c,ys) e
                then d else text "!" <> parens d
        return $ x <+> text "->" <+> braces e'
 promelaAssume (Info (x,ty,reft)) (c,ys) e
-  = do modify $ \s -> s { vars = ys ++ vars s }
+  = do modify $ \s -> s { vars = validVars ys ++ vars s }
        d <- promelaEffect e
        return $ assm $+$ nest 2 (braces (decls $+$ d))
   where
@@ -309,8 +314,9 @@ promelaNu c e1 e2
                         , procs = (c, args, p) : procs s
                         }
        return $
-         objIdType <+> promela c <+> equals <+> promela pidCtrName <> semi $+$
-         incPidCtr $+$
+         objIdType <+> promela c <> semi $+$
+         atomic (promela c <+> equals <+> promela pidCtrName <> semi $+$
+                 incPidCtr) $+$
          text "run" <+> procName c <> argList args <> semi $+$
          d
 
@@ -362,11 +368,14 @@ promelaRecursive x bdy (fs,as) (AbsEff ret@(Src r (Just t)) k) me
            ds = catMaybes mds
            decls = if null ds then empty else vcat ((<> semi) <$> ds)
        rdef@(_,f,_) <- promelaRecursiveDef x bdy (symbol <$> fs) vs
-       modify $ \s -> s { vars = r:vs }
+       modify $ \s -> s { vars = validVars (r:vs) }
        let call = text "run" <+> promela f <> argList (retChan : xs ++ vs ) <> semi
        d        <- promelaEffect k
        let wait = promela retChan <> text "??" <> promela r <> semi
-           decl = ptrType <+> promela r <> semi
+           decl = if symbolString r /= "_" then
+                    ptrType <+> promela r <> semi
+                  else
+                    empty
        return $ decls $+$ call $+$ decl $+$ wait $+$ d
 
 promelaRecursiveDef x bdy xs vs
@@ -385,9 +394,10 @@ promelaRecursiveDef x bdy xs vs
 
 promelaRecursiveCall :: Fp.Symbol -> [Effect] -> [Fp.Symbol] -> PM Doc
 promelaRecursiveCall f as vs
-  = do let (xs, mds) = unzip [(x,d) | (x,_,d) <- promelaVal <$> args ]
+  = do let (xs, mds) = unzip [(x,d) | (x,_,d) <- promelaVal <$> args
+                                    , symbolString x /= "_" ]
            call     = text "run" <+> promela f <+> argList (retChan : xs ++ vs) <> semi
-           waitDecl = if symbol x /= symbol "_" then
+           waitDecl = debug "WAIT DECL DEF" $ if symbolString (tracepp "WAITDECL" x) /= "_" then
                         ptrType <+> promela x <> semi
                       else
                         empty
@@ -455,10 +465,13 @@ promelaVar x
 
 maybeInfoVal :: Fp.Symbol -> Info -> Maybe Doc
 maybeInfoVal x (maybeCstrApp -> Just (cinfo, args))
-  = Just $ (ptrType <+> promela x <+> equals <+> heapPtrName tyname <> semi) $+$
-           (heapPtrName tyname <> text "++" <> semi) $+$
-           (access tyname x (symbol "tag") <+> equals <+> int (ctag cinfo) <> semi) $+$
-           (hcat (go <$> (zip [0..] args)))
+  = Just $ ptrType <+> promela x <> semi $+$
+           atomic (
+             promela x <+> equals <+> heapPtrName tyname <> semi $+$
+             heapPtrName tyname <> text "++" <> semi $+$
+             access tyname x (symbol "tag") <+> equals <+> int (ctag cinfo) <> semi $+$
+             hcat (go <$> (zip [0..] args))
+           )
   where
     go (i,Fp.EVar a) = obj tyname x <> cstr <> brackets (int i)
                        <+> equals <+> promela a <> semi $+$ empty
@@ -542,7 +555,7 @@ maybeRecursive = go [] []
     go fs as (Mu x (AbsEff f bdy))
       = go (f:fs) as (Mu x bdy)
     go fs as (Mu x bdy)
-      = Just (x, bdy, (fs', as'), kArg, me)
+      = Just (x, sub [(me, meArg)] bdy, (fs', as'), kArg, me)
       where
         fs'  = drop 2 fs
         [(Src me _), k] = take 2 fs

@@ -94,13 +94,12 @@ printEff (ETermAbs s e)
 printEff (EffTerm t)
   = printf "{ %s }" (printEffTerm t)
 
-synthEffects :: EffEnv -> [CoreBind] -> EffectM ()
+type Obligation = Doc
+synthEffects :: EffEnv -> [CoreBind] -> EffectM (Maybe Obligation)
 synthEffects g []
   = case lookupString g "main" of
-      Just e -> liftIO $ putStrLn (render (promela e))
-      Nothing -> return ()
--- synthEffects g []
---   = return ()
+      Just e ->  return $ Just (promela e)
+      Nothing -> return Nothing
 synthEffects g (cb:cbs)
   = do g' <- synth1Effect g cb
        synthEffects g' cbs
