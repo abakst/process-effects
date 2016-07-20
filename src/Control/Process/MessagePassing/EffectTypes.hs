@@ -23,12 +23,11 @@ module Control.Process.MessagePassing.EffectTypes (
   , gets, modify
   , unwrapApply
   , occurs
-  , recursivePhases
-    ,test 
+  , localVars
   ) where
 
 import Debug.Trace
-import Data.Generics (Data)
+import Data.Generics (Data, everything, mkQ)
 
 import           Var
 import           GHC
@@ -356,3 +355,26 @@ unwrapApply = go []
 occurs :: Symbol -> Effect -> Bool
 occurs s e
   = s `elem` freeEffTermVars (EffTerm e)
+
+localVars :: Effect -> [Symbol]
+localVars = nub . go
+  where
+    go (AbsEff (Src x (Just _)) e)
+      | symbolString x /= "_" = [x] ++ go e
+    go (AbsEff _ e)
+      = go e
+    go (Nu c (Par _ e))
+      = [c] ++ go e
+    go (Bind e1 e2)
+      = go e1 ++ go e2
+    go (NonDet es)
+      = concatMap go es
+    go (AppEff e e')
+      = go e ++ go e'
+    go (Assume _ _ e)
+      = go e
+    go (Pend e _)
+      = go e
+    go (Mu _ e)
+      = go e
+    go _ = []
