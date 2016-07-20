@@ -21,6 +21,10 @@ module Control.Process.MessagePassing.EffectTypes (
   , Symbol(..)
   , freshInt, freshTermVar, freshEffVar, freshChanVar, freshEffTyVar
   , gets, modify
+  , unwrapApply
+  , occurs
+  , recursivePhases
+    ,test 
   ) where
 
 import Debug.Trace
@@ -342,3 +346,13 @@ genericSubst f g h = goTerm
         where (x',p') = h su (x,p)
     goTerm su (Mu s e)
       = Mu (g su s) (goTerm (restrict su (symbol s)) e)
+
+unwrapApply :: Effect -> (Effect, [Effect])         
+unwrapApply = go []
+  where
+    go args (AppEff m n) = go (n:args) m
+    go args e            = (e, args)
+
+occurs :: Symbol -> Effect -> Bool
+occurs s e
+  = s `elem` freeEffTermVars (EffTerm e)

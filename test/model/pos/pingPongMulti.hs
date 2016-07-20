@@ -53,6 +53,7 @@ pingLoop (PList p ps)
        pingLoop ps
        return ()
 
+waitLoop :: PidList -> Process ()
 waitLoop Emp
   = return ()
 waitLoop (PList p ps)
@@ -61,8 +62,8 @@ waitLoop (PList p ps)
          Pong q -> do waitLoop ps
                       return ()
 
-main :: Process Int
+main :: Process ()
 main = do ps <- spawnLoop 3 
           pingLoop ps
           waitLoop ps
-          return 0
+          return ()

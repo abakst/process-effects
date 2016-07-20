@@ -17,7 +17,7 @@ import Type
 import DataCon
 import Name
 import OccName
-import CoreSyn
+import CoreSyn hiding (collectArgs)
 import CoreUtils
 import PrelNames
 import HscTypes hiding (lookupType)
@@ -404,17 +404,20 @@ unifyTerms su (AppEff (EffVar (Eff t)) (EffVar (Src x ty))) e'
     not (occurs t e')
   = let su' = su `catSubst` [(t, AbsEff (Src x ty) e')] in
     (su', sub su e')
-unifyTerms su (AppEff (EffVar (Eff t)) (EffVar (Src x ty))) e'
-  | t `notElem` dom su
-  = let su' = su `catSubst` mu
-        bdy = AbsEff (Src x ty) e'
-        mu  = [(t, Mu t bdy)]
-    in (su', AppEff (Mu t bdy) (EffVar (Src x ty)))
 unifyTerms su e' (AppEff (EffVar (Eff t)) (EffVar (Src x ty)))
   | t `notElem` dom su &&
     not (occurs t e')
   = let su' = su `catSubst` [(t, AbsEff (Src x ty) e')] in
     (su', sub su e')
+unifyTerms su e1 e2
+  | Just (su, e) <- unifyRecursive su e1 e2
+  = (su, e)
+-- unifyTerms su (AppEff (EffVar (Eff t)) (EffVar (Src x ty))) e'
+--   | t `notElem` dom su
+--   = let su' = su `catSubst` mu
+--         bdy = AbsEff (Src x ty) e'
+--         mu  = [(t, Mu t bdy)]
+--     in (su', AppEff (Mu t bdy) (EffVar (Src x ty)))
 unifyTerms su (AbsEff (Src s ty) e) (AbsEff (Src s' ty') e')
   | isNothing ty || isNothing ty' || ty == ty'
   = let (su', t') = unifyTerms su (sub [(s, s')] e) e'
@@ -456,9 +459,29 @@ unifyTerms sub t1 t2
     oops :: String
     oops = (printf "%s unifyTerm %s" (printEffTerm t1) (printEffTerm t2))
 
-occurs :: Symbol -> Effect -> Bool
-occurs s e
-  = s `elem` freeEffTermVars (EffTerm e)
+unifyRecursive su e@(AppEff m n) e'
+  | (EffVar (Eff f), as) <- unwrapApply e,
+    (xs, [])             <- collectArgs as, 
+    f `notElem` dom su && occurs f e'
+  = let su'  = su `catSubst` mu
+        body = L.foldr AbsEff e' xs
+        mu   = [(f, Mu f body)]
+    in Just $ (su', L.foldl AppEff (Mu f body) (EffVar <$> xs))
+unifyRecursive _ _ _
+  = Nothing
+
+collectArgs :: [Effect] -> ([Binder], [Effect])
+collectArgs = go []
+  where
+    go xs (EffVar x@(Src _ _):xs') = go (x:xs) xs'
+    go xs xs'                      = (reverse xs, xs')
+
+-- unifyTerms su (AppEff (EffVar (Eff t)) (EffVar (Src x ty))) e'
+--   | t `notElem` dom su
+--   = let su' = su `catSubst` mu
+--         bdy = AbsEff (Src x ty) e'
+--         mu  = [(t, Mu t bdy)]
+--     in (su', AppEff (Mu t bdy) (EffVar (Src x ty)))
 
 fst3 (x,_,_) = x
 snd3 (_,y,_) = y

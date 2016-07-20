@@ -47,9 +47,9 @@ instance Promela EffTy where
 
 sendProc :: Doc
 sendProc =
-  text "proctype send(int who; mtype ty; byte msg)" $+$
+  text "proctype send(byte whom; mtype ty; byte msg)" $+$
   text "{" $+$
-    nest 2 (text "mbuf[who]!ty,msg") $+$
+    nest 2 (text "mbuf[whom]!ty,msg") $+$
   text "}"
 
 initialPid :: Symbol
@@ -207,7 +207,7 @@ promelaEffect e = do recCall <- maybeRecursiveCall e
     go _ (maybeSend -> Just (p,m))
       = promelaSend p m
     go _ (maybeRecursive -> Just (x, bdy, (fs,as), k, me))
-      = promelaRecursive x (tracepp "BODY" bdy) (fs,as) k me
+      = promelaRecursive x bdy (fs,as) k me
     go _ (Nu x (Par e1 e2))
       = promelaNu x e1 e2
     go _ (Bind m (AbsEff (Src x t) n))
@@ -380,24 +380,28 @@ promelaRecursive x bdy (fs,as) (AbsEff ret@(Src r (Just t)) k) me
 
 promelaRecursiveDef x bdy xs vs
   = do i     <- gets n
-       recs  <- gets recs
        let f = symbol ("rec_fun_" ++ show i)
        modify $ \s -> s { n    = i + 1
-                        , recs = (x,f,xs,vs,Nothing):recs
+                        , recs = (x,f,xs,vs,Nothing):recs s
+                        , vars = validVars (xs ++ vs)
                         }
        bdy'   <- promelaEffect (dropArgs bdy)
-       modify $ \s -> s { recs = (x,f,xs,vs,Just bdy'):recs, vars = vs }
+       modify $ \s -> s { recs = replaceBody x bdy' <$> recs s
+                        , vars = vs }
        return (x,f,Just bdy')
   where
-    dropArgs (AbsEff _ e) = dropArgs e
+    dropArgs (AbsEff x e) = dropArgs e
     dropArgs e            = e
+    replaceBody x bdy r@(x',f,xs,vs,_)
+      | x == x'   = (x',f,xs,vs,Just bdy)
+      | otherwise = r
 
 promelaRecursiveCall :: Fp.Symbol -> [Effect] -> [Fp.Symbol] -> PM Doc
 promelaRecursiveCall f as vs
   = do let (xs, mds) = unzip [(x,d) | (x,_,d) <- promelaVal <$> args
                                     , symbolString x /= "_" ]
            call     = text "run" <+> promela f <+> argList (retChan : xs ++ vs) <> semi
-           waitDecl = debug "WAIT DECL DEF" $ if symbolString (tracepp "WAITDECL" x) /= "_" then
+           waitDecl = if symbolString x /= "_" then
                         ptrType <+> promela x <> semi
                       else
                         empty
@@ -555,7 +559,7 @@ maybeRecursive = go [] []
     go fs as (Mu x (AbsEff f bdy))
       = go (f:fs) as (Mu x bdy)
     go fs as (Mu x bdy)
-      = Just (x, sub [(me, meArg)] bdy, (fs', as'), kArg, me)
+      = Just (x, sub [(me, meArg)] bdy, (reverse fs', as'), kArg, me)
       where
         fs'  = drop 2 fs
         [(Src me _), k] = take 2 fs
@@ -583,8 +587,6 @@ breakArgs (AppEff m n) = Just $ go [n] m
     go as e = (e, as)
 breakArgs _ = Nothing
 
-
-
 isRecv :: Effect -> Bool
 isRecv (AppEff (EffVar (Src f _)) _)
   = symbolString f == "recv"
@@ -600,31 +602,6 @@ declareType ty@TypeInfo{}
     go ci = objIdType <+> text "c" <> int (ctag ci) <> brackets (int (max 1 (length (cargs ci)))) <> semi
 argName :: Fp.Symbol -> Int -> Doc
 argName s i = text "arg_" <> int i
-
---------------------------------
--- Extracting/Representing Processes
---------------------------------
--- data Process = Process {
---     procName :: Fp.Symbol
---   , procEff  :: Effect
---   }
-
--- splitProcesses :: Effect -> [Process]
--- splitProcesses e = let (master, ps) = go e
---                        init = Process {
---                                 procName = symbol "init"
---                               , procEff  = master
---                               }
---                    in init : ps
---   where
---     go (Nu s (Par e1 e2)) = (e2', Process { procName = s, procEff = e1 } : ps)
---       where
---         (e2', ps) = go e2
---     go (Bind e1 e2)       = (Bind e1' e2', ps ++ qs)
---       where
---         (e1', ps) = go e1
---         (e2', qs) = go e2
---     go e                  = (e, [])
 
 --------------------------------
 -- Extracting/Representing Types
