@@ -62,7 +62,7 @@ retVar  = symbol "_ret"
 procName :: Symbol -> Doc
 procName s = promela s <> text "proc"
 
-stackSize = int 10
+stackSize = int 128
 
 promelaProgram :: Int -> Effect -> Doc
 promelaProgram n eff
@@ -154,7 +154,7 @@ chanName :: Fp.Symbol -> Doc
 chanName t = promela t <> text "_chan"
 
 ptrType :: Doc
-ptrType = text "byte"
+ptrType = text "int"
 
 objIdType :: Doc
 objIdType = text "byte"
@@ -195,8 +195,9 @@ data PState = PState {
     vars  :: [Fp.Symbol]
   , procs :: [(Fp.Symbol, [Fp.Symbol], Doc)]
   , rec_funs  :: [(Fp.Symbol, Fp.Symbol, [Binder], [Fp.Symbol])]
-  , rec_stack :: [(Fp.Symbol, Int, Doc)]
+  , rec_stack :: [(Fp.Symbol, Fp.Symbol, Int, Doc)]
   , rec_label :: [(Fp.Symbol, Int)]
+  , rec_ctxt  :: [Fp.Symbol]
   , n     :: Int
   }
 type PM a = State PState a
@@ -220,7 +221,7 @@ stackName x
   = promela x <> text "_stack"
 
 emptyPState :: PState
-emptyPState = PState { vars = [initialPid], procs = [], n = 0, rec_stack = [], rec_label = [], rec_funs = [] }
+emptyPState = PState { vars = [initialPid], procs = [], n = 0, rec_ctxt = [], rec_stack = [], rec_label = [], rec_funs = [] }
 
 atomic :: Doc -> Doc
 atomic d
@@ -254,9 +255,13 @@ promelaEffect e = do recCall <- maybeRecursiveCall e
     go _ (EffVar (Src f _))
       = promelaVar f
     go _ (AppEff (EffVar (Eff f)) e)
-      = return $ maybe ret (\d -> d $+$ ret) d
+      = do stack <- gets rec_ctxt
+           return $ maybe (ret stack) (\d -> d $+$ ret stack) d
       where
-        ret = promela retVar <+> equals <+> promela x
+        ret s = promela retVar <+> equals <+> promela x $+$
+                case s of
+                  f:_ -> semi <> stackPtrName f <> text "--" <> semi
+                  _   -> empty
         (x, _, d) = promelaVal e
     go _ e = error (render $ text "promelaEffect:" <+> pretty e)
 
@@ -367,15 +372,26 @@ promelaSpawn p args
 
 promelaRecv p (x, Just t) e2
   = do d <- promelaEffect e2
-       return (decl <> semi $+$ recv <> semi $+$ d)
+       decl <- maybeDecl x
+       return (decl $+$ recv <> semi $+$ d)
   where
-    decl = if symbolString x == "_" then empty else ptrType <+> promela x
     recv = text "mbuf" <> brackets (promela p) <>
            text "??" <> ty <> comma <> promela x
     ty    = case tinfo of
               PrimType { tyname = n } -> promela n <> text "_ty"
               _                       -> promela t
     tinfo = tyInfo t
+
+maybeDecl :: Fp.Symbol -> PM Doc
+maybeDecl x
+  | symbolString x == "_"
+  = return empty
+  | otherwise
+  = do vs <- gets vars
+       if x `notElem` vs then
+         return (ptrType <+> promela x <> semi)
+       else
+         return empty
 
 promelaSend :: Effect -> Effect -> PM Doc
 promelaSend p m
@@ -400,17 +416,20 @@ promelaRecursive x bdy (fs,as) (AbsEff ret@(Src r (Just t)) k) me
                         , n = i + 1
                         , vars = locals ++ (symbol <$> fs) ++ vs
                         , rec_label = (x,0):rec_label s
+                        , rec_ctxt = f : rec_ctxt s
                         }
        body         <- promelaEffect (tracepp "input body" bdy)
        modify $ \s -> s { vars = vs
                         , rec_label = labels
+                        , rec_ctxt = tail (rec_ctxt s)
                         }
        chunks       <- gets rec_stack
 
-       let myChunks = [ (i,d) | c@(k,i,d) <- chunks, k == x ]
+       let myChunks = [ (i,d) | (k,_,i,d) <- chunks, k == x ]
            pcEq i   = pcRecord <+> equals<>equals <+> int i
            -- pcEq i   = stackFrame f <> text "." <> pcRecord <+> equals<>equals <+> int i
-           goChunk (i,d) = text "::" <+> pcEq i <+> text "->" $+$ nest 2 (braces d)
+           goChunk (i,d) = text "::" <+> pcEq i <+> text "->" $+$
+                           nest 2 (braces d)
 
            declStack    = (actRecordTyName f) <+> stackName f <> brackets stackSize <> semi
            declStackPtr = ptrType <+> stackPtrName f <+> equals <+> int 1 <> semi
@@ -418,7 +437,6 @@ promelaRecursive x bdy (fs,as) (AbsEff ret@(Src r (Just t)) k) me
            declFormals  = vcat [ ptrType <+> promela (symbol f) <> semi | f <- fs ]
 
            loopBody = popActivationRecord f locals (symbol <$> fs)  $+$
-                      stackPtrName f <> text "--" <> semi           $+$
                       text "if" $+$
                         (nest 2 $ vcat (goChunk <$> ((0,body):myChunks))) $+$
                       text "fi"
@@ -433,7 +451,7 @@ promelaRecursive x bdy (fs,as) (AbsEff ret@(Src r (Just t)) k) me
                   declStackPtr $+$
                   declLocals   $+$
                   declFormals  $+$
-                  activationRecord f [] (symbol <$> fs) as 0 $+$
+                  pushArgs f [] (symbol <$> fs) as 0 $+$
                   loop
        kont <- promelaEffect k
        return $ call                      $+$
@@ -484,11 +502,12 @@ promelaRecursiveCall xf f forms ls as
        vs <- gets vars
        let place   =
              stackPtrName f <> text "++" <> semi $+$
-             activationRecord f ls (symbol <$> forms) args l <> semi
+             saveLocals f ls (symbol <$> forms) args l <> semi $+$
+             pushArgs f ls (symbol <$> forms) args l <> semi
            restore = promela ret <+> equals <+> promela retVar <> semi
        d <- promelaEffect k
        modify $ \s -> s { vars = vs
-                        , rec_stack = (xf,l,restore $+$ d):rec_stack s
+                        , rec_stack = (xf,f,l,restore $+$ d):rec_stack s
                         }
        return (atomic place)
   where
@@ -500,6 +519,7 @@ promelaRecursiveCall xf f forms ls as
     ret = maybe (symbol "_") (const x) t
 
 stackFrame f = stackName f <> brackets (stackPtrName f <+> text "-" <+> int 1)
+oldStackFrame f = stackName f <> brackets (stackPtrName f <+> text "-" <+> int 2)
 
 popActivationRecord f ls forms
   = ptrType <+> pcRecord <+> equals <+> frame <> text "." <> pcRecord <> semi $+$
@@ -514,21 +534,31 @@ popActivationRecord f ls forms
                         | x <- ls
                         ]
 
-activationRecord :: Fp.Symbol -> [Fp.Symbol] -> [Fp.Symbol] -> [Effect] -> Int -> Doc
-activationRecord f ls forms args pc
-  = savePC     $+$
+saveLocals :: Fp.Symbol -> [Fp.Symbol] -> [Fp.Symbol] -> [Effect] -> Int -> Doc
+saveLocals f ls forms args pc
+  = saveLocals $+$
+    saveArgs   $+$
+    savePC
+  where
+    oldName    = oldStackFrame f
+    savePC     = oldName <> text "." <> pcRecord <+> equals <+> int pc <> semi
+    saveArgs   = vcat [ oldName <> text "." <> promela f <+> equals <+> promela f <> semi
+                      | f <- forms ]
+    saveLocals = vcat [ oldName <> text "." <> promela l <+> equals <+> promela l <> semi
+                      | l <- ls ]
+
+pushArgs :: Fp.Symbol -> [Fp.Symbol] -> [Fp.Symbol] -> [Effect] -> Int -> Doc
+pushArgs f ls forms args pc
+  = newPC      $+$
     argDecls   $+$
-    saveLocals $+$
-    saveArgs
+    newArgs
   where
     name       = stackFrame f
-    savePC     = name <> text "." <> pcRecord <+> equals <+> int pc <> semi
+    newPC      = name <> text "." <> pcRecord <+> equals <+> int 0 <> semi
     mds        = [ (x,md) | (x,_,md) <- promelaVal <$> args ]
     argDecls   = vcat . catMaybes $ (snd <$> mds)
-    saveArgs   = vcat [ name <> text "." <> promela f <+> equals <+> promela x <> semi
+    newArgs    = vcat [ name <> text "." <> promela f <+> equals <+> promela x <> semi
                       | (f,x) <- zip forms (fst <$> mds) ]
-    saveLocals = vcat [ name <> text "." <> promela l <+> equals <+> promela l <> semi
-                      | l <- ls ]
 
 
 newLabel :: Fp.Symbol -> PM Int
