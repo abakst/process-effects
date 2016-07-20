@@ -13,5 +13,4 @@ main = do loop ()
           return ()
   where
     loop x = do y <- send p ()
-                x <- loop ()
-                return ()
+                loop ()
