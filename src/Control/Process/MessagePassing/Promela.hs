@@ -254,6 +254,8 @@ promelaEffect e = do recCall <- maybeRecursiveCall e
       = return $ text "assert (0 == 1)"
     go _ (EffVar (Src f _))
       = promelaVar f
+    go c (EffVar (Eff f))
+      = go c (AppEff (EffVar (Eff f)) (EffVar (Src (symbol "true") Nothing)))
     go _ (AppEff (EffVar (Eff f)) e)
       = do stack <- gets rec_ctxt
            return $ maybe (ret stack) (\d -> d $+$ ret stack) d
@@ -399,9 +401,9 @@ promelaSend p m
            <> (maybe spawn (\d -> (d $+$ spawn)) decls')
   where
     spawn = promelaSpawn (text "send")
-              [promela xP, promela ty, promela xM]
+              [promela xP, promela ty, promela (tracepp "xM" xM)]
     (xP, _,  decls)  = promelaVal p
-    (xM, ty, decls') = promelaVal m
+    (xM, ty, decls') = promelaVal $ tracepp "send m" m
 
 -- This is the initial call to a recursive function.
 -- Need to create a stack, set up first activation record,
@@ -504,7 +506,7 @@ promelaRecursiveCall xf f forms ls as
              stackPtrName f <> text "++" <> semi $+$
              saveLocals f ls (symbol <$> forms) args l <> semi $+$
              pushArgs f ls (symbol <$> forms) args l <> semi
-           restore = promela ret <+> equals <+> promela retVar <> semi
+           restore = ret <+> equals <+> promela retVar <> semi
        d <- promelaEffect k
        modify $ \s -> s { vars = vs
                         , rec_stack = (xf,f,l,restore $+$ d):rec_stack s
@@ -515,8 +517,13 @@ promelaRecursiveCall xf f forms ls as
     kont = head $ drop (length as - 2) (trace (printf "***kont*** %s" (render $ pretty as)) as)
     -- (Src x _, retVal)   = unwrapRecursiveCont kont
     -- (retX, t, mretDecl) = promelaVal retVal
-    (AbsEff (Src x t) k)        = kont
-    ret = maybe (symbol "_") (const x) t
+    (xt, k) = case kont of
+                AbsEff (Src x t) k -> (Just (x,t), k)
+                k                  -> (Nothing, k)
+    -- (AbsEff (Src x t) k)        = case kont of
+    --                                 AbsEff (Src x t) k -> kont
+    --                                 _ -> tracepp "kont was actually" kont
+    ret = promela $ maybe (symbol "_") (\(x,t) -> maybe (symbol "_") (const x) t) xt
 
 stackFrame f = stackName f <> brackets (stackPtrName f <+> text "-" <+> int 1)
 oldStackFrame f = stackName f <> brackets (stackPtrName f <+> text "-" <+> int 2)
@@ -596,10 +603,10 @@ promelaVal (EffVar (Src x _))
   | x == Fp.symbol (dataConWorkId unitDataCon)
   = (symbol "true", unitTy, Nothing)
 promelaVal (EffVar (Src x _))
-  | x == Fp.symbol (dataConWorkId trueDataCon)
+  | symbolString x == (symbolString $ Fp.symbol (dataConWorkId trueDataCon))
   = (symbol "true", unitTy, Nothing)
 promelaVal (EffVar (Src x _))
-  | x == Fp.symbol (dataConWorkId falseDataCon)
+  | symbolString x == (symbolString $ Fp.symbol (dataConWorkId falseDataCon))
   = (symbol "false", unitTy, Nothing)
 promelaVal (EffVar (Src x Nothing)) -- Variable lookup
   = (x, error (printf "uh oh needed a type %s" (Fp.symbolString x)), Nothing)
@@ -607,9 +614,10 @@ promelaVal (EffVar (Src x (Just t))) -- Variable lookup
   = (x, t, Nothing)
 promelaVal (Pend (EffVar (Src x (Just t))) info) -- Possibly an expression?
   | Just d <- maybeInfoVal x info = (x, t, Just d)
-  | otherwise                     = promelaVal (EffVar (Src x (Just t)))
-promelaVal (Pend _ (Info (x,t,_)))
-  = (x, t, Nothing)
+  | otherwise                     = promelaVal $ tracepp "trying this" (EffVar (Src x (Just t)))
+promelaVal (Pend e (Info (x,t,_)))
+  = promelaVal (EffVar (Src x (Just t)))
+  -- = (x, t, Nothing)
 promelaVal e = error (printf "\n\n*****promelaVal:\n%s\n******\n\n" (render (pretty e)))
 
 promelaCstrVal :: CstrInfo -> [Fp.Expr] -> Doc

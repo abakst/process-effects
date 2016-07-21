@@ -10,7 +10,6 @@ p = undefined
 
 main :: Process ()
 main = do loop ()
-          return ()
   where
-    loop x = do y <- send p ()
+    loop x = do send p ()
                 loop ()
