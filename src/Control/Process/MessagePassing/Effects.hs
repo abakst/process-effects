@@ -43,7 +43,7 @@ import Language.Fixpoint.Types hiding (PPrint(..), SrcSpan(..), ECon)
 import qualified Language.Fixpoint.Types as Fp
 
 debugUnify = False
-debugApp   = False
+debugApp   = True
 
 debug s x = trace (s ++ ": " ++ show x) x  
 
@@ -109,7 +109,7 @@ synth1Effect g (NonRec b e)
   = do et  <-  applySubstM =<< synthEff g e
        g'  <-  mapM applySubstM g
        let egen = generalizeEff g' et
-       liftIO $ putStrLn (printf "%s : %s" (getOccString b) (printEff $ betaReduceTy egen))
+       liftIO $ putStrLn (printf "%s : %s" (symbolString . symbol $ b) (printEff $ betaReduceTy egen))
        let tys = L.nub . tyInfos $ snd <$> tyBoundTys egen
        return (M.insert (getName b) (generalizeEff g' egen) g')
 
@@ -117,7 +117,7 @@ synth1Effect g (Rec [(b,e)])
   = do et1 <- defaultEff (CoreUtils.exprType e)
        et2 <- synthEff (M.insert (getName b) et1 g) e
        et  <- unifyTysM et1 et2
-       liftIO $ putStrLn (printf "%s : %s" (getOccString b) (printEff $ betaReduceTy et))
+       liftIO $ putStrLn (printf "%s : %s" (symbolString . symbol $ b) (printEff $ betaReduceTy et))
        return (M.insert (getName b) et g)
 
 bkFun :: Type -> Maybe ([TyVar], [Type], Type)
@@ -283,9 +283,9 @@ synthEff g (App eFun eArg)
        EPi s tIn tOut             <- applySubstM =<< unifyTysM funEff (EPi v argEff e)
        reft                       <- lookupSortedReft eArg
        effOut                     <- applySubstM tOut
-       -- liftIO $ putStrLn (printf "apply %s\n\t%s\n\tx:%s\n\ts:%s\n\treft: %s "
-       --                               (printEff (betaReduceTy effOut)) (printEff (applyArg x (Just reft) effOut))
-       --                               (symbolString x) (symbolString s) (showpp (rTypeReft reft)))
+       liftIO $ putStrLn (printf "apply %s\n\t%s\n\tx:%s\n\ts:%s\n\treft: %s "
+                                     (printEff (betaReduceTy effOut)) (printEff (applyArg x mty Nothing effOut))
+                                     (symbolString x) (symbolString s) (showpp reft))
        return . maybeSubArg x reft $ applyArg x mty Nothing {- reft -} effOut
   where
     mty = Just ty
@@ -518,17 +518,26 @@ printTy msg p
 
 lookupSortedReft :: CoreExpr -> EffectM SortedReft
 lookupSortedReft e@(Var x)
-  = substa reintern <$> lookupType (getSrcSpan x) e
-  -- = ((flip meet (uTop $ exprReft (symbol x))) <$>) <$> lookupType (getSrcSpan x) e
+  = do t_spec <- substa reintern <$> lookupType (getSrcSpan x) e
+       checkSpec e t_spec
 lookupSortedReft (Tick tt e@(Var x))
-  = substa reintern <$> lookupType (getSrcSpan x) e 
+  = checkSpec e =<< substa reintern <$> lookupType (getSrcSpan x) e 
 lookupSortedReft (Tick tt e)
-  = substa reintern <$> lookupType (tickSrcSpan tt) e
+  = checkSpec e =<< substa reintern <$> lookupType (tickSrcSpan tt) e
 lookupSortedReft e
+  = defaultSortedReft e
+reintern s = symbol (symbolString s)
+
+checkSpec e tspec@(RR so _) = do
+   t_def@(RR so' _)  <- defaultSortedReft e
+   return $ if so == so' then tspec
+                         else t_def
+
+defaultSortedReft :: CoreExpr -> EffectM SortedReft
+defaultSortedReft e
   = do emb <- gets tyconEmb
        let t = ofType (CoreUtils.exprType e) :: SpecType
        return (rTypeSortedReft emb t)
-reintern s = symbol (symbolString s)
     
 lookupType :: SrcSpan -> CoreExpr -> EffectM SortedReft
 lookupType s e = do
@@ -538,7 +547,8 @@ lookupType s e = do
     Nothing  ->
       let t = ofType (CoreUtils.exprType e) :: SpecType in
       return (rTypeSortedReft emb t)
-    Just [t] -> return t
+    Just [t] -> do
+      return t
 
 traceTy :: String -> EffTy -> EffectM EffTy
 traceTy m t = liftIO (putStrLn (printf "%s: %s" m (printEff t))) >> return t

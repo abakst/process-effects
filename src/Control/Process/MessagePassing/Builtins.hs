@@ -61,7 +61,7 @@ thenEffect [_,a,b]
              $ ETermAbs e1Sym
              $ EPi fSym (EffTerm (EffVar (Eff e0Sym)))
              $ EPi gSym (EffTerm (EffVar (Eff e1Sym)))
-             $ EffTerm (absEff (Src fSym (error "fSym")) (absEff (Src gSym Nothing)
+             $ EffTerm (absEff (Src fSym Nothing) (absEff (Src gSym Nothing)
                                  (effBindF (AppEff (AppEff (EffVar (Eff e0Sym))
                                               (AbsEff (Src (symbol "_") tyA)
                                                         (AppEff (AppEff (EffVar (Eff e1Sym)) (EffVar kont))
