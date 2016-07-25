@@ -1,4 +1,6 @@
 {-# Language ViewPatterns #-}
+{-# Language TypeSynonymInstances #-}
+{-# Language FlexibleInstances #-}
 module Control.Process.MessagePassing.Promela where
 
 import           Debug.Trace
@@ -45,13 +47,6 @@ instance Promela EffTy where
   promela _
     = error "I only know how to convert values of type { λK.λme.x }!"
 
-sendProc :: Doc
-sendProc =
-  text "proctype send(byte whom; mtype ty; byte msg)" $+$
-  text "{" $+$
-    nest 2 (text "mbuf[whom]!ty,msg") $+$
-  text "}"
-
 initialPid :: Symbol
 initialPid = symbol "_init"
 pidCtrName = symbol "_pidCtr"
@@ -59,8 +54,17 @@ pidCtrName = symbol "_pidCtr"
 retVar :: Symbol
 retVar  = symbol "_ret"
 
+maxProcsVar :: Symbol
+maxProcsVar = symbol "max_procs"
+
 procName :: Symbol -> Doc
 procName s = promela s <> text "proc"
+
+sendDef :: Doc
+sendDef = text "#define send(whom,ty,msg) mbuf[_pid*max_procs + whom]!ty,msg"
+
+recvDef :: Doc
+recvDef = text "#define recv(i,ty,msg) mbuf[i*max_procs + _pid]??ty,msg"
 
 stackSize = int 128
 
@@ -72,16 +76,19 @@ promelaProgram n eff
     heaps               $+$
     buf                 $+$
     pidCtr              $+$
-    sendProc            $+$
+    maxProcs            $+$
+    sendDef             $+$
+    recvDef             $+$
     children            $+$
     initialProc master
   where
     (master, st)
-      = runState (promelaEffect eff) emptyPState
+      = runState (promelaEffect eff) emptyPState { proc_limit = n }
     children
       = promelaProcs st
     records
       = recordTypes st
+    maxProcs = text "int" <+> promela maxProcsVar <+> equals <+> int n <> semi
 
     mtype  = declMtype allts
     types  = vcat $ declareType <$> tinfos
@@ -94,8 +101,8 @@ promelaProgram n eff
          <+> equals <+> int 1 <> semi
 
     -- N channels --
-    numChans = n
-    buf      = chanDecl n n
+    numChans = n*n
+    buf      = chanDecl numChans n
 
 bodyTemplate body
   = nest 2 (ret $+$ body)
@@ -110,18 +117,6 @@ promelaProcs st
       = text "proctype" <+> procName name <+> formalsList args <+> text "{" $+$
           bodyTemplate body $+$
         text "}"
-
--- promelaFunctions :: PState -> Doc
--- promelaFunctions st
---   = vcat (go <$> recs st)
---   where
---     template f args body
---       = text "proctype" <+> promela f <+>
---         funFormalsList (callerChan:args) <+> text "{" $+$
---           bodyTemplate body $+$
---         text "}"
---     go (x,f,as,vs,Just bdy)
---       = template f (as ++ vs) bdy
 
 recordTypes :: PState -> Doc
 recordTypes PState { rec_funs = recs }
@@ -181,7 +176,10 @@ data SrcPattern = InitDecl Fp.Symbol (Maybe Type) Doc
                 | Send Effect Effect
 
 instance Promela Fp.Symbol where
-  promela s = text (cleanup <$> symbolString s)
+  promela s = promela (symbolString s)
+
+instance Promela String where
+  promela s = text (cleanup <$> s)
     where
       cleanup = replace '.' '_'
               . replace '#' '_'
@@ -192,13 +190,14 @@ instance Promela Fp.Symbol where
       replace x y c = if c == x then y else c
 
 data PState = PState {
-    vars  :: [Fp.Symbol]
-  , procs :: [(Fp.Symbol, [Fp.Symbol], Doc)]
-  , rec_funs  :: [(Fp.Symbol, Fp.Symbol, [Binder], [Fp.Symbol])]
-  , rec_stack :: [(Fp.Symbol, Fp.Symbol, Int, Doc)]
-  , rec_label :: [(Fp.Symbol, Int)]
-  , rec_ctxt  :: [Fp.Symbol]
-  , n     :: Int
+    vars       :: [Fp.Symbol]
+  , procs      :: [(Fp.Symbol, [Fp.Symbol], Doc)]
+  , rec_funs   :: [(Fp.Symbol, Fp.Symbol, [Binder], [Fp.Symbol])]
+  , rec_stack  :: [(Fp.Symbol, Fp.Symbol, Int, Doc)]
+  , rec_label  :: [(Fp.Symbol, Int)]
+  , rec_ctxt   :: [Fp.Symbol]
+  , proc_limit :: Int
+  , n          :: Int
   }
 type PM a = State PState a
 
@@ -221,13 +220,25 @@ stackName x
   = promela x <> text "_stack"
 
 emptyPState :: PState
-emptyPState = PState { vars = [initialPid], procs = [], n = 0, rec_ctxt = [], rec_stack = [], rec_label = [], rec_funs = [] }
+emptyPState = PState { vars       = [initialPid]
+                     , procs      = []
+                     , n          = 0
+                     , rec_ctxt   = []
+                     , rec_stack  = []
+                     , rec_label  = []
+                     , rec_funs   = []
+                     , proc_limit = 5
+                     }
 
 atomic :: Doc -> Doc
 atomic d
   = text "atomic" <+> braces d
 
-incPidCtr = promela pidCtrName <> text "++" <> semi
+incPidCtr = promela pidCtrName <> text "++" <> semi $+$
+            promelaMacro "assert" [ promela pidCtrName <+>
+                                    text "<" <+>
+                                    promela maxProcsVar
+                                  ]
 
 promelaEffect :: Effect -> PM Doc
 promelaEffect e = do recCall <- maybeRecursiveCall e
@@ -277,17 +288,20 @@ formalsList = parens . hcat . punctuate semi . fmap go
 
 validVars = filter (\v -> symbolString v /= "_")
 
+makeNonDet ds
+  = text "if" $+$ nest 2 (vcat ds') $+$ text "fi"
+  where
+    ds' = (text "::" <+>) <$> ds
+
 promelaNonDet es
   = do ds <- mapM go es
-       return $
-         text "if" $+$
-              nest 2 (vcat ds) $+$
-         text "fi"
+       let promDs = makeNonDet ds
+       return promDs
   where
     go e = do vs <- gets vars
               d <- promelaEffect e
               modify $ \s -> s { vars = vs }
-              return (text "::" <+> d)
+              return d
 
 promelaAssume i@(Info (x,ty,reft)) (c,ys) e
   | PrimType {tyname = t} <- tyInfo ty,
@@ -369,16 +383,21 @@ promelaRVal :: Effect -> Doc
 promelaRVal e
   = error (printf "rval: %s" (render $ pretty e))
 
-promelaSpawn p args
-  = text "run" <+> p <> parens (hcat $ punctuate comma args)
+promelaMacro f args
+  = text f <> parens (hcat $ punctuate comma args)
 
+promelaRecv :: Fp.Symbol -> (Fp.Symbol, Maybe Type) -> Effect -> PM Doc
 promelaRecv p (x, Just t) e2
-  = do d <- promelaEffect e2
+  = do n    <- gets proc_limit
+       d    <- promelaEffect e2
        decl <- maybeDecl x
-       return (decl $+$ recv <> semi $+$ d)
+       return (decl $+$ recv n <> semi $+$ d)
   where
-    recv = text "mbuf" <> brackets (promela p) <>
-           text "??" <> ty <> comma <> promela x
+    recv n  = atomic $ makeNonDet (recv1 <$> [0..n-1])
+    recv1 i = promelaMacro "recv" [ int i
+                                  , ty
+                                  , promela x
+                                  ]
     ty    = case tinfo of
               PrimType { tyname = n } -> promela n <> text "_ty"
               _                       -> promela t
@@ -400,10 +419,12 @@ promelaSend p m
   =  return $ (maybe empty (\d -> (d $+$ empty )) decls)
            <> (maybe spawn (\d -> (d $+$ spawn)) decls')
   where
-    spawn = promelaSpawn (text "send")
-              [promela xP, promela ty, promela (tracepp "xM" xM)]
+    spawn = promelaMacro "send" [ promela xP
+                                , promela ty
+                                , promela xM
+                                ]
     (xP, _,  decls)  = promelaVal p
-    (xM, ty, decls') = promelaVal $ tracepp "send m" m
+    (xM, ty, decls') = promelaVal m
 
 -- This is the initial call to a recursive function.
 -- Need to create a stack, set up first activation record,
@@ -459,22 +480,6 @@ promelaRecursive x bdy (fs,as) (AbsEff ret@(Src r (Just t)) k) me
        return $ call                      $+$
                 promelaMaybeDecl r retVar $+$
                 kont
-  -- = do vs    <- gets vars
-  --      -- The arguments to the recursive function should be
-  --      -- the ret channel + args + in-scope vars at the first call
-  --      let (xs,mds) = unzip [ (x,d) | (x,_,d) <- promelaVal <$> as ]
-  --          ds = catMaybes mds
-  --          decls = if null ds then empty else vcat ((<> semi) <$> ds)
-  --      rdef@(_,f,_) <- promelaRecursiveDef x bdy (symbol <$> fs) vs
-  --      modify $ \s -> s { vars = validVars (r:vs) }
-  --      let call = text "run" <+> promela f <> argList (retChan : xs ++ vs ) <> semi
-  --      d        <- promelaEffect k
-  --      let wait = promela retChan <> text "??" <> promela r <> semi
-  --          decl = if symbolString r /= "_" then
-  --                   ptrType <+> promela r <> semi
-  --                 else
-  --                   empty
-  --      return $ decls $+$ call $+$ decl $+$ wait $+$ d
 
 promelaMaybeDecl x y
   = if symbolString x /= "_" then
@@ -720,9 +725,9 @@ maybeCstrApp (Info (x,ty, reft))
     go _ = Nothing
 
 maybeSend :: Effect -> Maybe (Effect, Effect)
-maybeSend (AppEff (AppEff (AppEff (EffVar (Src f _)) _) e2) e3)
+maybeSend (AppEff (AppEff (AppEff (EffVar (Src f _)) _) p) m)
   | symbolString f == "send"
-  = Just (e2, e3)
+  = Just (p, m)
 maybeSend _
   = Nothing
 

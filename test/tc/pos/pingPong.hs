@@ -18,8 +18,9 @@ pongProc = do
   myPid <- getSelfPid
   msg   <- recv
   case msg of
-    Ping q ->
-      send q (Pong myPid)
+    Ping q -> do
+      let response = Pong myPid
+      send q response 
 
 pingProc :: Pid -> Process ()
 pingProc p = do
