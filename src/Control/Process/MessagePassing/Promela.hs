@@ -269,13 +269,15 @@ promelaEffect e = do recCall <- maybeRecursiveCall e
       = go c (AppEff (EffVar (Eff f)) (EffVar (Src (symbol "true") Nothing)))
     go _ (AppEff (EffVar (Eff f)) e)
       = do stack <- gets rec_ctxt
-           return $ maybe (ret stack) (\d -> d $+$ ret stack) d
+           vs    <- gets vars
+           let (x, _, d) = promelaVal vs e
+           modify $ \s -> s { vars = validVars (x : vs) }
+           return $ maybe (ret x stack) (\d -> d $+$ ret x stack) d
       where
-        ret s = promela retVar <+> equals <+> promela x $+$
-                case s of
-                  f:_ -> semi <> stackPtrName f <> text "--" <> semi
-                  _   -> empty
-        (x, _, d) = promelaVal e
+        ret x s = promela retVar <+> equals <+> promela x $+$
+                  case s of
+                    f:_ -> semi <> stackPtrName f <> text "--" <> semi
+                    _   -> empty
     go _ e = error (render $ text "promelaEffect:" <+> pretty e)
 
 argList :: [Fp.Symbol] -> Doc
@@ -286,7 +288,7 @@ formalsList = parens . hcat . punctuate semi . fmap go
   where
     go s = ptrType <+> promela s
 
-validVars = filter (\v -> symbolString v /= "_")
+validVars = nub . filter (\v -> symbolString v /= "_")
 
 makeNonDet ds
   = text "if" $+$ nest 2 (vcat ds') $+$ text "fi"
@@ -389,8 +391,8 @@ promelaMacro f args
 promelaRecv :: Fp.Symbol -> (Fp.Symbol, Maybe Type) -> Effect -> PM Doc
 promelaRecv p (x, Just t) e2
   = do n    <- gets proc_limit
-       d    <- promelaEffect e2
        decl <- maybeDecl x
+       d    <- promelaEffect e2
        return (decl $+$ recv n <> semi $+$ d)
   where
     recv n  = atomic $ makeNonDet (recv1 <$> [0..n-1])
@@ -416,15 +418,17 @@ maybeDecl x
 
 promelaSend :: Effect -> Effect -> PM Doc
 promelaSend p m
-  =  return $ (maybe empty (\d -> (d $+$ empty )) decls)
-           <> (maybe spawn (\d -> (d $+$ spawn)) decls')
-  where
-    spawn = promelaMacro "send" [ promela xP
-                                , promela ty
-                                , promela xM
-                                ]
-    (xP, _,  decls)  = promelaVal p
-    (xM, ty, decls') = promelaVal m
+  = do vs                   <- gets vars
+       let (xP, _,  decls)  = promelaVal vs p
+           (xM, ty, decls') = promelaVal vs m
+           vs'              = validVars ([xP, xM] ++ vs)
+           spawnCmd         = promelaMacro "send" [ promela xP
+                                                  , promela ty
+                                                  , promela xM
+                                                  ]
+       modify $ \s -> s { vars = vs' }
+       return $ (maybe empty (\d -> (d $+$ empty )) decls)
+             <> (maybe spawnCmd (\d -> (d $+$ spawnCmd)) decls')
 
 -- This is the initial call to a recursive function.
 -- Need to create a stack, set up first activation record,
@@ -470,12 +474,16 @@ promelaRecursive x bdy (fs,as) (AbsEff ret@(Src r (Just t)) k) me
                     nest 2 (text ":: else ->" <+> braces loopBody) $+$
                   text "od"
 
+           (argXs, push) =
+             pushArgs vs f [] (symbol <$> fs) as 0
+
            call = declStack    $+$
                   declStackPtr $+$
                   declLocals   $+$
                   declFormals  $+$
-                  pushArgs f [] (symbol <$> fs) as 0 $+$
+                  push         $+$
                   loop
+       modify $ \s -> s { vars = validVars (argXs ++ vars s) }
        kont <- promelaEffect k
        return $ call                      $+$
                 promelaMaybeDecl r retVar $+$
@@ -510,8 +518,9 @@ promelaRecursiveCall xf f forms ls as
        let place   =
              stackPtrName f <> text "++" <> semi $+$
              saveLocals f ls (symbol <$> forms) args l <> semi $+$
-             pushArgs f ls (symbol <$> forms) args l <> semi
+             push <> semi
            restore = ret <+> equals <+> promela retVar <> semi
+           push    = snd $ pushArgs vs f ls (symbol <$> forms) args l
        d <- promelaEffect k
        modify $ \s -> s { vars = vs
                         , rec_stack = (xf,f,l,restore $+$ d):rec_stack s
@@ -559,15 +568,23 @@ saveLocals f ls forms args pc
     saveLocals = vcat [ oldName <> text "." <> promela l <+> equals <+> promela l <> semi
                       | l <- ls ]
 
-pushArgs :: Fp.Symbol -> [Fp.Symbol] -> [Fp.Symbol] -> [Effect] -> Int -> Doc
-pushArgs f ls forms args pc
-  = newPC      $+$
-    argDecls   $+$
-    newArgs
+pushArgs :: [Fp.Symbol]
+         -> Fp.Symbol
+         -> [Fp.Symbol]
+         -> [Fp.Symbol]
+         -> [Effect]
+         -> Int
+         -> ([Fp.Symbol], Doc)
+pushArgs env f ls forms args pc
+  = (vars, push)
   where
+    vars       = fst <$> mds
+    push       = newPC      $+$
+                 argDecls   $+$
+                 newArgs
     name       = stackFrame f
     newPC      = name <> text "." <> pcRecord <+> equals <+> int 0 <> semi
-    mds        = [ (x,md) | (x,_,md) <- promelaVal <$> args ]
+    mds        = [ (x,md) | (x,_,md) <- promelaVal env <$> args ]
     argDecls   = vcat . catMaybes $ (snd <$> mds)
     newArgs    = vcat [ name <> text "." <> promela f <+> equals <+> promela x <> semi
                       | (f,x) <- zip forms (fst <$> mds) ]
@@ -580,50 +597,45 @@ newLabel f
        return (l + 1)
   where
     update (f',l') = if f == f' then (f',l'+1) else (f',l')
-  -- = do let (xs, mds) = unzip [(x,d) | (x,_,d) <- promelaVal <$> args
-  --                                   , symbolString x /= "_" ]
-  --          call     = text "run" <+> promela f <+> argList (retChan : xs ++ vs) <> semi
-  --          waitDecl = if symbolString x /= "_" then
-  --                       ptrType <+> promela x <> semi
-  --                     else
-  --                       empty
-  --          wait     = waitDecl $+$
-  --                     promela retChan <> text "??" <> promela x <> semi
-  --          retCall  = promela callerChan <> text "!!" <> promela retX
-  --          decls    = vcat $ catMaybes mds
-  --          returns  = maybe retCall (\d -> d $+$ retCall) mretDecl
-  --      return (decls $+$ call $+$ wait $+$ returns)
-  -- where
-  --   args = take (length as - 2) as
-  --   kont = head $ drop (length as - 2) (trace (printf "***kont*** %s" (render $ pretty as)) as)
-  --   (Src x _,retVal)    = unwrapRecursiveCont kont
-  --   (retX, t, mretDecl) = promelaVal retVal
 
 unwrapRecursiveCont (AbsEff x (AppEff (AppEff _ v) _)) = (x,v)
 unwrapRecursiveCont (AbsEff x (AppEff _ v)) = (x,v)
 unwrapRecursiveCont e = error (printf "unwrap: %s\n" (render $ pretty e))
 
-promelaVal :: Effect -> (Fp.Symbol, Type, Maybe Doc)
-promelaVal (EffVar (Src x _))
+promelaVal :: [Fp.Symbol] -> Effect -> (Fp.Symbol, Type, Maybe Doc)
+promelaVal env (EffVar (Src x _))
   | x == Fp.symbol (dataConWorkId unitDataCon)
   = (symbol "true", unitTy, Nothing)
-promelaVal (EffVar (Src x _))
+promelaVal env (EffVar (Src x _))
   | symbolString x == (symbolString $ Fp.symbol (dataConWorkId trueDataCon))
   = (symbol "true", unitTy, Nothing)
-promelaVal (EffVar (Src x _))
+promelaVal env (EffVar (Src x _))
   | symbolString x == (symbolString $ Fp.symbol (dataConWorkId falseDataCon))
   = (symbol "false", unitTy, Nothing)
-promelaVal (EffVar (Src x Nothing)) -- Variable lookup
+promelaVal env (EffVar (Src x Nothing)) -- Variable lookup
   = (x, error (printf "uh oh needed a type %s" (Fp.symbolString x)), Nothing)
-promelaVal (EffVar (Src x (Just t))) -- Variable lookup
+promelaVal env (EffVar (Src x (Just t))) -- Variable lookup
+  | x `elem` env
   = (x, t, Nothing)
-promelaVal (Pend (EffVar (Src x (Just t))) info) -- Possibly an expression?
-  | Just d <- maybeInfoVal x info = (x, t, Just d)
-  | otherwise                     = promelaVal $ tracepp "trying this" (EffVar (Src x (Just t)))
-promelaVal (Pend e (Info (x,t,_)))
-  = promelaVal (EffVar (Src x (Just t)))
-  -- = (x, t, Nothing)
-promelaVal e = error (printf "\n\n*****promelaVal:\n%s\n******\n\n" (render (pretty e)))
+  | otherwise
+  = havoc x t
+promelaVal env (Pend (EffVar (Src x (Just t))) info) -- Possibly an expression?
+  | Just d <- maybeInfoVal env x info
+  = (x, t, Just d)
+  | otherwise
+  = promelaVal env $ EffVar (Src x (Just t))
+promelaVal env (Pend e (Info (x,t,_)))
+  = promelaVal env (EffVar (Src x (Just t)))
+promelaVal env e = error (printf "\n\n*****promelaVal:\n%s\n******\n\n" (render (pretty e)))
+
+havoc x t
+  | tyName t == pidType
+  = (x, t, Just declX)
+  | otherwise
+  = (x, t, Nothing)
+  where
+    declX = ptrType <+> promela x <> semi $+$
+            text "select" <> parens (promela x <+> colon <+> int 0 <+> text ".." <+> promela pidCtrName)
 
 promelaCstrVal :: CstrInfo -> [Fp.Expr] -> Doc
 promelaCstrVal c args
@@ -649,10 +661,12 @@ promelaVar :: Fp.Symbol -> PM Doc
 promelaVar x
   | x == Fp.symbol (dataConWorkId unitDataCon)
   = return $ int 1
+  | otherwise
+  = error "\n\npromelaVar\n\n"
 
-maybeInfoVal :: Fp.Symbol -> Info -> Maybe Doc
-maybeInfoVal x (maybeCstrApp -> Just (cinfo, args))
-  = Just $ ptrType <+> promela x <> semi $+$
+maybeInfoVal :: [Fp.Symbol] -> Fp.Symbol -> Info -> Maybe Doc
+maybeInfoVal env x (maybeCstrApp -> Just (cinfo, args))
+  = Just $ maybeDecl $+$
            atomic (
              promela x <+> equals <+> heapPtrName tyname <> semi $+$
              heapPtrName tyname <> text "++" <> semi $+$
@@ -660,15 +674,19 @@ maybeInfoVal x (maybeCstrApp -> Just (cinfo, args))
              vcat (go <$> (zip [0..] args))
            )
   where
+    maybeDecl = if x `elem` env then empty else ptrType <+> promela x <> semi
     go (i,Fp.EVar a) = obj tyname x <> cstr <> brackets (int i)
                        <+> equals <+> promela a <> semi $+$ empty
     cstr = text ".c" <> int (ctag cinfo)
     tyname = ctype cinfo
-maybeInfoVal x (maybeInt -> Just i)
+maybeInfoVal env x (maybeInt -> Just i)
+  | x `notElem` env
   = Just $ (text "int" <+> promela x <+> equals <+> int i <> semi)
-maybeInfoVal x (maybeExpr -> Just e)
+  | otherwise
+  = Just $ (promela x <+> equals <+> int i <> semi)
+maybeInfoVal env x (maybeExpr -> Just e)
   = Just $ (text "int" <+> promela x <+> equals <+> e <> semi)
-maybeInfoVal x _
+maybeInfoVal env x _
   = Nothing
 
 eqpreds :: Fp.SortedReft -> [Fp.Expr]
@@ -822,6 +840,9 @@ primTyInfo :: (TyCon, [Arg]) -> TypeInfo
 primTyInfo (ty, _)
   = adtTyInfo (ty,[])
 
+pidType :: Symbol
+pidType = symbol "Control.Process.MessagePassing.Pid"
+
 adtTyInfo :: (TyCon, [Arg]) -> TypeInfo
 adtTyInfo (ty, _)
   | getUnique ty == boolTyConKey
@@ -829,6 +850,8 @@ adtTyInfo (ty, _)
   | getUnique ty == intTyConKey
   = PrimType { tyname = symbol ty }
   | ty == unitTyCon
+  = PrimType { tyname = symbol ty }
+  | name == pidType
   = PrimType { tyname = symbol ty }
   | otherwise
   = TypeInfo { tyname = name
