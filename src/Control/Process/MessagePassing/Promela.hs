@@ -248,12 +248,14 @@ promelaEffect :: Effect -> PM Doc
 promelaEffect e = do recCall <- maybeRecursiveCall e
                      go recCall e
   where
-    go (Just (x, f, xs, ls, as)) _
-      = promelaRecursiveCall x f xs ls as
     go r (Pend e i)
-      = do env <- promelaInfo i
+      = do vs <- gets vars
+           env <- promelaInfo i
+           vs' <- gets vars
            k   <- go r e
            return (env $+$ k)
+    go (Just (x, f, xs, ls, as)) _
+      = promelaRecursiveCall x f xs ls as
     go _ (maybeSend -> Just (p,m))
       = promelaSend p m
     go _ (maybeRecursive -> Just (x, bdy, (fs,as), k, me))
@@ -274,13 +276,19 @@ promelaEffect e = do recCall <- maybeRecursiveCall e
     go _ (EffVar (Src f _))
       = promelaVar f
     go c (EffVar (Eff f))
-      = go c (AppEff (EffVar (Eff f)) (EffVar (Src (symbol "true") Nothing)))
+      = do stack <- gets rec_ctxt
+           return $ ret stack
+      where
+        ret s = case s of
+                  f:_ -> semi <> stackPtrName f <> text "--" <> semi
+                  _   -> empty
+    --   = go c (AppEff (EffVar (Eff f)) (EffVar (Src (symbol "true") Nothing)))
     go _ (AppEff (EffVar (Eff f)) e)
       = do stack <- gets rec_ctxt
            vs    <- gets vars
-           let (x, _, d) = promelaVal vs e
+           let (x, _, d) = promelaVal vs (tracepp "ret e" e)
            modify $ \s -> s { vars = validVars (x : vs) }
-           return $ maybe (ret x stack) (\d -> d $+$ ret x stack) d
+           return $ maybe (ret x stack) ($+$ ret x stack) d
       where
         ret x s = promela retVar <+> equals <+> promela x $+$
                   case s of
@@ -301,7 +309,7 @@ validVars = nub . filter (\v -> symbolString v /= "_")
 promelaInfo :: Info -> PM Doc
 promelaInfo i@(Info (x,ty,φ))
   = do env <- gets vars
-       let (z,_,d) = promelaVal env (tracepp "promelaInfo" $ Pend (EffVar (Src x (Just ty))) i)
+       let (z,_,d) = promelaVal env (Pend (EffVar (Src x (Just ty))) i)
        case d of
          Nothing   -> return empty
          Just zdec -> do
@@ -390,14 +398,14 @@ promelaNu c e1 e2
 
 promelaBind :: Effect -> (Fp.Symbol, Maybe Type) -> Effect -> PM Doc
 promelaBind (Pend e1 i) (x,t) e2
-  = promelaBind (tracepp "e1" e1) (x,t) e2
+  = promelaBind e1 (x,t) e2
 promelaBind e1 (x,t) (Pend e2 i)
   = promelaBind e1 (x,t) e2
 promelaBind e1 (x,t) e2
   | Just (p,m) <- maybeSend e1
   = do d1 <- promelaSend p m
-       d2 <- promelaEffect (tracepp "e2" e2)
-       return $ (debug "d1" d1 <> semi $+$ d2)
+       d2 <- promelaEffect e2
+       return $ (d1 <> semi $+$ d2)
   | Just p <- maybeRecv e1
     = promelaRecv p (x,t) e2
   | otherwise
@@ -467,7 +475,7 @@ promelaRecursive x bdy (fs,as) (AbsEff ret@(Src r (Just t)) k) me
                         , rec_label = (x,0):rec_label s
                         , rec_ctxt = f : rec_ctxt s
                         }
-       body         <- promelaEffect (tracepp "input body" bdy)
+       body         <- promelaEffect bdy
        modify $ \s -> s { vars = vs
                         , rec_label = labels
                         , rec_ctxt = tail (rec_ctxt s)
@@ -505,7 +513,7 @@ promelaRecursive x bdy (fs,as) (AbsEff ret@(Src r (Just t)) k) me
                   declFormals  $+$
                   push         $+$
                   loop
-       modify $ \s -> s { vars = validVars (argXs ++ vars s) }
+       modify $ \s -> s { vars = validVars (r : argXs ++ vars s) }
        kont <- promelaEffect k
        return $ call                      $+$
                 promelaMaybeDecl r retVar $+$
@@ -541,10 +549,11 @@ promelaRecursiveCall xf f forms ls as
              stackPtrName f <> text "++" <> semi $+$
              saveLocals f ls (symbol <$> forms) args l <> semi $+$
              push <> semi
-           restore = ret <+> equals <+> promela retVar <> semi
+           restore = promela ret <+> equals <+> promela retVar <> semi
            push    = snd $ pushArgs vs f ls (symbol <$> forms) args l
+       modify $ \s -> s { vars = validVars (ret : vs) }
        d <- promelaEffect k
-       modify $ \s -> s { vars = vs
+       modify $ \s -> s { vars = validVars (ret : vs)
                         , rec_stack = (xf,f,l,restore $+$ d):rec_stack s
                         }
        return (atomic place)
@@ -559,7 +568,7 @@ promelaRecursiveCall xf f forms ls as
     -- (AbsEff (Src x t) k)        = case kont of
     --                                 AbsEff (Src x t) k -> kont
     --                                 _ -> tracepp "kont was actually" kont
-    ret = promela $ maybe (symbol "_") (\(x,t) -> maybe (symbol "_") (const x) t) xt
+    ret = maybe (symbol "_") (\(x,t) -> maybe (symbol "_") (const x) t) xt
 
 stackFrame f = stackName f <> brackets (stackPtrName f <+> text "-" <+> int 1)
 oldStackFrame f = stackName f <> brackets (stackPtrName f <+> text "-" <+> int 2)
@@ -642,7 +651,7 @@ promelaVal env (EffVar (Src x (Just t))) -- Variable lookup
   | otherwise
   = havoc x t
 promelaVal env (Pend (EffVar (Src x (Just t))) info) -- Possibly an expression?
-  | Just d <- maybeInfoVal env x (tracepp "promelaVal info" info)
+  | Just d <- maybeInfoVal env x info
   = (x, t, Just d)
   | otherwise
   = promelaVal env $ EffVar (Src x (Just t))
@@ -708,7 +717,10 @@ maybeInfoVal env x (maybeInt -> Just i)
   | otherwise
   = Just $ (promela x <+> equals <+> int i <> semi)
 maybeInfoVal env x (maybeExpr -> Just e)
-  = Just $ (text "int" <+> promela x <+> equals <+> e <> semi)
+  | x `notElem` env
+  = Just $ text "int" <+> promela x <+> equals <+> e <> semi
+  | otherwise
+  = Just $ promela x <+> equals <+> e <> semi
 maybeInfoVal env x _
   = Nothing
 
@@ -748,8 +760,8 @@ maybeExpr (Info (x,ty,reft))
     goOp _ = Nothing
 maybeInt :: Info -> Maybe Int
 maybeInt (Info (x,ty,reft))
-  = case debug "extractPreds" $ extractPreds go (debug "maybeInt reft" reft) of
-      c:_ -> debug "maybeInt" c `seq` Just c
+  = case extractPreds go reft of
+      c:_ -> Just c
       _   -> Nothing
   where
     go (Fp.ECst e _)      = go e
@@ -799,13 +811,14 @@ maybeRecursive = go [] []
       = Nothing
 
 maybeRecursiveCall :: Effect -> PM (Maybe (Fp.Symbol, Fp.Symbol, [Binder], [Fp.Symbol], [Effect]))
+maybeRecursiveCall (Pend e i) = maybeRecursiveCall e
 maybeRecursiveCall (breakArgs -> Just (EffVar (Eff x), as))
   = do rs <- gets rec_funs
        return . fmap go $ find p rs
   where
     p  (x',_,_,_) = x == x'
     go (x,f,forms,ls)  = (x,f,forms,ls,as)
-maybeRecursiveCall _
+maybeRecursiveCall e
   = return Nothing
 
 breakArgs (AppEff m n) = Just $ go [n] m
