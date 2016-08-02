@@ -276,25 +276,28 @@ promelaEffect e = do recCall <- maybeRecursiveCall e
     go _ (EffVar (Src f _))
       = promelaVar f
     go c (EffVar (Eff f))
-      = do stack <- gets rec_ctxt
-           return $ ret stack
-      where
-        ret s = case s of
-                  f:_ -> semi <> stackPtrName f <> text "--" <> semi
-                  _   -> empty
-    --   = go c (AppEff (EffVar (Eff f)) (EffVar (Src (symbol "true") Nothing)))
+      = returnStack
     go _ (AppEff (EffVar (Eff f)) e)
-      = do stack <- gets rec_ctxt
-           vs    <- gets vars
-           let (x, _, d) = promelaVal vs (tracepp "ret e" e)
+      = do vs            <- gets vars
+           retStack      <- returnStack
+           let (x, _, d) = promelaVal vs e
            modify $ \s -> s { vars = validVars (x : vs) }
-           return $ maybe (ret x stack) ($+$ ret x stack) d
+           return $ fromMaybe empty d $+$ setReturn x $+$ retStack
       where
-        ret x s = promela retVar <+> equals <+> promela x $+$
-                  case s of
-                    f:_ -> semi <> stackPtrName f <> text "--" <> semi
-                    _   -> empty
+        setReturn x = promela retVar <+> equals <+> promela x <> semi
     go _ e = error (render $ text "promelaEffect:" <+> pretty e)
+
+returnStack :: PM Doc
+returnStack
+  = do stack <- gets rec_ctxt
+       return $ case stack of
+                  f:_ -> stackPtrName f <> text "--" <> semi
+
+maybeReturn :: Effect -> Maybe (Fp.Symbol, Maybe Effect)
+maybeReturn (EffVar (Eff f))
+  = Just (f, Nothing)
+maybeReturn (AppEff (EffVar (Eff f)) e)
+  = Just (f, Just e)
 
 argList :: [Fp.Symbol] -> Doc
 argList = parens . hcat . punctuate comma . fmap promela
