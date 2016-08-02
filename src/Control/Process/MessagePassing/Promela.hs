@@ -37,7 +37,7 @@ class Promela a where
 
 instance Promela EffTy where
   promela (EffTerm e)
-    = promelaProgram 5 closed
+    = promelaProgram 10 closed
     where
       closed =
         debugEff "closed"  $
@@ -66,19 +66,23 @@ sendDef = text "#define send(whom,ty,msg) mbuf[_pid*max_procs + whom]!ty,msg"
 recvDef :: Doc
 recvDef = text "#define recv(i,ty,msg) mbuf[i*max_procs + _pid]??ty,msg"
 
-stackSize = int 128
+assumeDef :: Doc
+assumeDef = text "#define assume(_p) do :: _p -> break :: else -> skip od"
+
+stackSize = int 16
 
 promelaProgram :: Int -> Effect -> Doc
 promelaProgram n eff
-  = mtype               $+$
+  = maxProcs            $+$
+    sendDef             $+$
+    recvDef             $+$
+    assumeDef           $+$
+    mtype               $+$
     types               $+$
     records             $+$
     heaps               $+$
     buf                 $+$
     pidCtr              $+$
-    maxProcs            $+$
-    sendDef             $+$
-    recvDef             $+$
     children            $+$
     initialProc master
   where
@@ -88,7 +92,7 @@ promelaProgram n eff
       = promelaProcs st
     records
       = recordTypes st
-    maxProcs = text "int" <+> promela maxProcsVar <+> equals <+> int n <> semi
+    maxProcs = text "#define" <+> promela maxProcsVar <+> int n
 
     mtype  = declMtype allts
     types  = vcat $ declareType <$> tinfos
@@ -246,6 +250,10 @@ promelaEffect e = do recCall <- maybeRecursiveCall e
   where
     go (Just (x, f, xs, ls, as)) _
       = promelaRecursiveCall x f xs ls as
+    go r (Pend e i)
+      = do env <- promelaInfo i
+           k   <- go r e
+           return (env $+$ k)
     go _ (maybeSend -> Just (p,m))
       = promelaSend p m
     go _ (maybeRecursive -> Just (x, bdy, (fs,as), k, me))
@@ -289,6 +297,16 @@ formalsList = parens . hcat . punctuate semi . fmap go
     go s = ptrType <+> promela s
 
 validVars = nub . filter (\v -> symbolString v /= "_")
+
+promelaInfo :: Info -> PM Doc
+promelaInfo i@(Info (x,ty,φ))
+  = do env <- gets vars
+       let (z,_,d) = promelaVal env (tracepp "promelaInfo" $ Pend (EffVar (Src x (Just ty))) i)
+       case d of
+         Nothing   -> return empty
+         Just zdec -> do
+                modify $ \s -> s { vars = validVars (z : env) }
+                return zdec
 
 makeNonDet ds
   = text "if" $+$ nest 2 (vcat ds') $+$ text "fi"
@@ -371,11 +389,15 @@ promelaNu c e1 e2
          d
 
 promelaBind :: Effect -> (Fp.Symbol, Maybe Type) -> Effect -> PM Doc
+promelaBind (Pend e1 i) (x,t) e2
+  = promelaBind (tracepp "e1" e1) (x,t) e2
+promelaBind e1 (x,t) (Pend e2 i)
+  = promelaBind e1 (x,t) e2
 promelaBind e1 (x,t) e2
   | Just (p,m) <- maybeSend e1
   = do d1 <- promelaSend p m
-       d2 <- promelaEffect e2
-       return $ (d1 <> semi $+$ d2)
+       d2 <- promelaEffect (tracepp "e2" e2)
+       return $ (debug "d1" d1 <> semi $+$ d2)
   | Just p <- maybeRecv e1
     = promelaRecv p (x,t) e2
   | otherwise
@@ -427,8 +449,8 @@ promelaSend p m
                                                   , promela xM
                                                   ]
        modify $ \s -> s { vars = vs' }
-       return $ (maybe empty (\d -> (d $+$ empty )) decls)
-             <> (maybe spawnCmd (\d -> (d $+$ spawnCmd)) decls')
+       return $ (maybe empty    ($+$ empty)    decls) $+$
+                (maybe spawnCmd ($+$ spawnCmd) decls')
 
 -- This is the initial call to a recursive function.
 -- Need to create a stack, set up first activation record,
@@ -620,7 +642,7 @@ promelaVal env (EffVar (Src x (Just t))) -- Variable lookup
   | otherwise
   = havoc x t
 promelaVal env (Pend (EffVar (Src x (Just t))) info) -- Possibly an expression?
-  | Just d <- maybeInfoVal env x info
+  | Just d <- maybeInfoVal env x (tracepp "promelaVal info" info)
   = (x, t, Just d)
   | otherwise
   = promelaVal env $ EffVar (Src x (Just t))
@@ -635,7 +657,8 @@ havoc x t
   = (x, t, Nothing)
   where
     declX = ptrType <+> promela x <> semi $+$
-            text "select" <> parens (promela x <+> colon <+> int 0 <+> text ".." <+> promela pidCtrName)
+            text "select" <> parens (promela x <+> colon <+> int 0 <+> text ".." <+> promela maxProcsVar) <> semi $+$
+            promelaMacro "assume" [promela x <+> text "<" <+> promela pidCtrName]
 
 promelaCstrVal :: CstrInfo -> [Fp.Expr] -> Doc
 promelaCstrVal c args
@@ -700,6 +723,8 @@ propPreds (Fp.RR _ (Fp.Reft (vv,e)))
 extractPreds :: (Fp.Expr -> Maybe a) -> Fp.SortedReft -> [a]
 extractPreds f e
   = catMaybes (f <$> eqpreds e)
+
+extractPropPreds :: (Fp.Expr -> Maybe a) -> Fp.SortedReft -> [a]
 extractPropPreds f e
   = catMaybes (f <$> propPreds e)
 
@@ -723,8 +748,8 @@ maybeExpr (Info (x,ty,reft))
     goOp _ = Nothing
 maybeInt :: Info -> Maybe Int
 maybeInt (Info (x,ty,reft))
-  = case extractPreds go reft of
-      c:_ -> Just c
+  = case debug "extractPreds" $ extractPreds go (debug "maybeInt reft" reft) of
+      c:_ -> debug "maybeInt" c `seq` Just c
       _   -> Nothing
   where
     go (Fp.ECst e _)      = go e
@@ -753,6 +778,8 @@ maybeRecv :: Effect -> Maybe Symbol
 maybeRecv (AppEff (EffVar (Src f _)) (EffVar (Src me _)))
   | symbolString f == "recv" = Just me
   | otherwise = Nothing
+maybeRecv _
+  = Nothing
 
 maybeRecursive :: Effect -> Maybe (Symbol, Effect, ([Binder], [Effect]), Effect, Fp.Symbol)
 maybeRecursive = go [] []

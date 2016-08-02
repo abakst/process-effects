@@ -36,7 +36,7 @@ maybeAnnot i@(Info (x,_,Fp.RR so (Fp.Reft (vv,p)))) d
       d <+> parens (text "where" <+> 
                          Fp.pprint (Fp.subst1 p (vv, Fp.expr (symbol x))))
      else
-       Fp.pprint x <+> colon <+> Fp.pprint so
+       d
 
 instance Pretty Info where
   pprintPrec _ (Info (x,_,reft))

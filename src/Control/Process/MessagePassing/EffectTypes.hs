@@ -37,6 +37,7 @@ import           Data.List
 import qualified Data.HashMap.Strict as H
 import           Control.Monad.Reader
 import           Control.Monad.State
+import           Text.Printf
 
 import           Language.Haskell.Liquid.Types
 import           Language.Haskell.Liquid.Types.RefType
@@ -126,6 +127,10 @@ betaReduce (AbsEff s e)
   = AbsEff s (betaReduce e)
 betaReduce (Mu s e)
   = Mu s (betaReduce e)
+betaReduce (AppEff (Pend e1 i) e2)
+  = Pend (betaReduce (AppEff e1 e2)) i
+betaReduce (AppEff e1 (Pend e2 i))
+  = Pend (betaReduce (AppEff e1 e2)) i
 betaReduce (AppEff e1 e2)
   = case (betaReduce e1, betaReduce e2) of
       (AbsEff (Eff s) m, n) ->
@@ -137,6 +142,7 @@ betaReduce (AppEff e1 e2)
       (AbsEff (Src s ty) m, n) ->
         betaReduce $ sub [(s, n)] m
 
+      (Pend e1' i, e2') -> Pend (betaReduce (AppEff e1' e2')) i
       (e1', e2') -> AppEff e1' e2'
 betaReduce (Pend e xt) = Pend (betaReduce e) xt
 betaReduce (Assume i (c,bs) e) = Assume i (c,bs) (betaReduce e)
@@ -152,7 +158,7 @@ applyArg x mt mi = go
     go (EPi s' t1' t2')  = EPi s' t1' (go t2')
     go (EffTerm e)       = EffTerm (betaReduce $ AppEff e m)
       where
-        m = maybe v (\i -> Pend v i) mi
+        m = maybe v (Pend v) mi
         v = EffVar (Src x mt)
     go e = e
 

@@ -43,7 +43,7 @@ import Language.Fixpoint.Types hiding (PPrint(..), SrcSpan(..), ECon)
 import qualified Language.Fixpoint.Types as Fp
 
 debugUnify = False
-debugApp   = True
+debugApp   = False
 
 debug s x = trace (s ++ ": " ++ show x) x  
 
@@ -283,15 +283,17 @@ synthEff g (App eFun eArg)
        EPi s tIn tOut             <- applySubstM =<< unifyTysM funEff (EPi v argEff e)
        reft                       <- lookupSortedReft eArg
        effOut                     <- applySubstM tOut
+       let effOutSub = maybeSubArg x reft $ applyArg x mty Nothing {- reft -} effOut
        liftIO $ putStrLn (printf "apply %s\n\t%s\n\tx:%s\n\ts:%s\n\treft: %s "
-                                     (printEff (betaReduceTy effOut)) (printEff (applyArg x mty Nothing effOut))
+                                     (printEff (betaReduceTy effOut)) (printEff (betaReduceTy $ effOutSub))
                                      (symbolString x) (symbolString s) (showpp reft))
-       return . maybeSubArg x reft $ applyArg x mty Nothing {- reft -} effOut
+       return effOutSub
   where
     mty = Just ty
     maybeSubArg :: Symbol -> SortedReft -> EffTy -> EffTy
     maybeSubArg s t e
-      = maybe e (\v -> sub [(s, Info (v,ty,t))] e) $ maybeExtractVar eArg
+      -- = maybe e (\v -> sub [(s, Info (v,ty,t))] e) $ maybeExtractVar eArg
+      = maybe e (\v -> prefixInfo (Info (v,ty,t)) $ sub [(s, Info (v,ty,t))] e) $ maybeExtractVar eArg
     ty = CoreUtils.exprType eArg
 
 synthEff g (Case e x t alts)
@@ -303,6 +305,16 @@ synthEff g (Case e x t alts)
     app e = AppEff (AppEff e (EffVar kont)) (EffVar me)
     ex = maybe err id $ maybeExtractVar e
     err = error "Not a var (case)"
+
+prefixInfo :: Info -> EffTy -> EffTy
+prefixInfo i = go 
+  where
+    go EffNone        = EffNone
+    go (EForAll x t)  = go t
+    go (ETyApp e1 e2) = ETyApp (go e1) (go e2)
+    go (EPi s t1 t2)  = EPi s t1 (go t2)
+    go (EffTerm e)    = EffTerm (Pend e i)
+
 
 generalizeEff g
   = gen freeEffTyVars EForAll . gen freeEffTermVars ETermAbs
