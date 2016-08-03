@@ -89,7 +89,7 @@ freshInt =
      return n
 freshEffVar =
   do n <- freshInt
-     return (symbol ("η" ++ show n))
+     return (symbol ("f" ++ show n))
 freshTermVar
   = do n <- freshInt
        return (symbol ("x" ++ show n))
@@ -155,7 +155,7 @@ applyArg x mt mi = go
     go EffNone           = EffNone
     go (EForAll x' t)    = t -- WRONG
     go (ETyApp e1 e2)    = ETyApp (go e1) (go e2)
-    go (EPi s' t1' t2')  = EPi s' t1' (go t2')
+    go (EPi s' t1' t2')  = EPi s' (go t1') (go t2')
     go (EffTerm e)       = EffTerm (betaReduce $ AppEff e m)
       where
         m = maybe v (Pend v) mi
@@ -168,7 +168,7 @@ abstractArg x t = go
     go EffNone           = EffNone
     go (EForAll s t)     = EForAll s (go t)
     go (ETyApp e1 e2)    = ETyApp (go e1) (go e2)
-    go (EPi s' t1' t2')  = EPi s' t1' (go t2')
+    go (EPi s' t1' t2')  = EPi s' (go t1') (go t2')
     go (EffTerm e)       = EffTerm (AbsEff (Src x t) e)
     go e                 = EForAll x e
 
@@ -199,7 +199,8 @@ freeEffTermVars (EffTerm e)
     go (AbsEff (Eff x) e2) = go e2 \\ [x]
     go (Bind e1 e2)        = collect go e1 e2
     go (NonDet es)         = nub (concatMap go es)
-    go (Nu s e)            = go e
+    go (Nu _ e)            = go e
+    go (Mu x e)            = go e \\ [x]
     go (Par e1 e2)         = collect go e1 e2
     go (Assume _ _ e)      = go e
     go (Pend e _)          = go e
@@ -214,7 +215,6 @@ freeEffTermVars (ETermAbs s t)
 freeEffTermVars (ETyApp t t')
   = collect freeEffTermVars t t'
 freeEffTermVars _ = []
-                
 
 instance Symbolic Binder where
   symbol (Src x _) = x

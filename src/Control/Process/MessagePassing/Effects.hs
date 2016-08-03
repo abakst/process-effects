@@ -1,4 +1,5 @@
-module Control.Process.MessagePassing.Effects ( synthEffects ) where
+-- module Control.Process.MessagePassing.Effects ( synthEffects ) where
+module Control.Process.MessagePassing.Effects  where
 
 import Debug.Trace
 import Data.Maybe
@@ -108,17 +109,19 @@ synth1Effect :: EffEnv -> CoreBind -> EffectM EffEnv
 synth1Effect g (NonRec b e)
   = do et  <-  applySubstM =<< synthEff g e
        g'  <-  mapM applySubstM g
-       let egen = generalizeEff g' et
-       liftIO $ putStrLn (printf "%s : %s" (symbolString . symbol $ b) (printEff $ betaReduceTy egen))
+       let egen = generalizeEff g' (betaReduceTy et)
+       liftIO $ putStrLn (printf "%s : %s" (symbolString . symbol $ b) (printEff egen))
        let tys = L.nub . tyInfos $ snd <$> tyBoundTys egen
-       return (M.insert (getName b) (generalizeEff g' egen) g')
+       return (M.insert (getName b) egen g')
 
 synth1Effect g (Rec [(b,e)])              
   = do et1 <- defaultEff (CoreUtils.exprType e)
        et2 <- synthEff (M.insert (getName b) et1 g) e
        et  <- unifyTysM et1 et2
-       liftIO $ putStrLn (printf "%s : %s" (symbolString . symbol $ b) (printEff $ betaReduceTy et))
-       return (M.insert (getName b) et g)
+       g'  <- mapM applySubstM g
+       let egen = generalizeEff g' (betaReduceTy et)
+       liftIO $ putStrLn (printf "%s : %s" (symbolString . symbol $ b) (printEff egen))
+       return (M.insert (getName b) egen g')
 
 bkFun :: Type -> Maybe ([TyVar], [Type], Type)
 bkFun t
@@ -284,9 +287,10 @@ synthEff g (App eFun eArg)
        reft                       <- lookupSortedReft eArg
        effOut                     <- applySubstM tOut
        let effOutSub = maybeSubArg x reft $ applyArg x mty Nothing {- reft -} effOut
-       liftIO $ putStrLn (printf "apply %s\n\t%s\n\tx:%s\n\ts:%s\n\treft: %s "
-                                     (printEff (betaReduceTy effOut)) (printEff (betaReduceTy $ effOutSub))
-                                     (symbolString x) (symbolString s) (showpp reft))
+       -- liftIO $ putStrLn (printf "apply %s\n\t%s\n\tx:%s\n\ts:%s\n\treft: %s "
+       --                               (printEff (betaReduceTy effOut))
+       --                               (printEff (betaReduceTy $ effOutSub))
+       --                               (symbolString x) (symbolString s) (showpp reft))
        return effOutSub
   where
     mty = Just ty
@@ -357,8 +361,10 @@ unifyTysM t1 t2
     ap tsu esu = sub esu . sub tsu
 
 unifyTys tsu esu t1 t2                 
-  = do when debugUnify $ liftIO (putStrLn dbg)
-       unifyTermTys tsu esu t1 t2 
+  = do u@(_,_,t) <- unifyTermTys tsu esu t1 t2
+       when debugUnify . liftIO $ do (putStrLn dbg)
+                                     (putStrLn (printf "===> %s\n" (printEff t)))
+       return u
   where
     dbg = printf "UNIFY:\n%s\n%s\n\n\tsubt:(%s)\n\tsube:(%s)"
             (printEff t1) (printEff t2)
@@ -401,77 +407,126 @@ unifyTermTys tsub esub t1 t2
   where
     oops = printf "%s unify %s\nsubt:(%s)\nsube:(%s)" (printEff t1) (printEff t2) (printSubst printEff tsub) (printSubst printEffTerm esub)
 
-unifyTerms su (EffVar (Eff t)) e
-  | t `notElem` dom su && 
-    not (occurs t e)
-    = let su' = su `catSubst` [(t, e)] in
-      (su', sub su' e)
-unifyTerms su e (EffVar (Eff t))
-  | t `notElem` dom su && 
-    not (occurs t e)
-    = let su' = su `catSubst` [(t, e)] in
-      (su', sub su' e)
-unifyTerms su (AppEff (EffVar (Eff t)) (EffVar (Src x ty))) e'
-  | t `notElem` dom su &&
-    not (occurs t e')
-  = let su' = su `catSubst` [(t, AbsEff (Src x ty) e')] in
-    (su', sub su e')
-unifyTerms su e' (AppEff (EffVar (Eff t)) (EffVar (Src x ty)))
-  | t `notElem` dom su &&
-    not (occurs t e')
-  = let su' = su `catSubst` [(t, AbsEff (Src x ty) e')] in
-    (su', sub su e')
 unifyTerms su e1 e2
+  = (su', t')
+  where
+    t'      = if debugUnify then tracepp "unifyTerms(res)" t else t
+    e1'     = if debugUnify then tracepp "unifyTerms(e1)" e1 else e1
+    e2'     = if debugUnify then tracepp "unifyTerms(e2)" e2 else e2
+    (su',t)  = unifyTerms' su e1' e2'
+    tracepp = Control.Process.MessagePassing.Promela.tracepp
+
+unifyTerms' su (Pend e s) (Pend e' s')
+  = let (su', e'') = unifyTerms su e e' in
+    (su', Pend e'' s')
+-- unifyTerms' su (Pend e s) e'
+--   = let (su', e'') = unifyTerms su e e' in
+--     (su', sub su' (Pend e'' s))
+-- unifyTerms' su e (Pend e' s)
+--   = let (su', e'') = unifyTerms su e e' in
+--     (su', sub su' (Pend e'' s))
+unifyTerms' su (EffVar (Eff t)) e
+  | t `notElem` dom su && 
+    not (occurs t e)
+    = let su' = su `catSubst` [(t, e)] in
+      (su', sub su' e)
+unifyTerms' su e (EffVar (Eff t))
+  | t `notElem` dom su && 
+    not (occurs t e)
+    = let su' = su `catSubst` [(t, e)] in
+      (su', sub su' e)
+unifyTerms' su e1@(AppEff (EffVar v) _) e2
+  | Just (su', e') <- unifyApply su e1 e2
+  = (su', e')
+unifyTerms' su e1 e2@(AppEff (EffVar v) _)
+  | Just (su', e') <- unifyApply su e1 e2
+  = (su', e')
+-- unifyTerms' su e@(AppEff (EffVar (Eff t)) e1) 
+--                  (AppEff (EffVar (Eff u)) e2)
+--   | t == u 
+--   = (su, e)
+unifyTerms' su (AppEff (EffVar (Eff t)) (EffVar (Src x ty))) e'
+  | t `notElem` dom su &&
+    not (occurs t e')
+  = let su' = su `catSubst` [(t, AbsEff (Src x ty) e')] in
+    (su', sub su e')
+unifyTerms' su e' (AppEff (EffVar (Eff t)) (EffVar (Src x ty)))
+  | t `notElem` dom su &&
+    not (occurs t e')
+  = let su' = su `catSubst` [(t, AbsEff (Src x ty) e')] in
+    (su', sub su e')
+
+-- -- Need to generalize this (should be easy)
+-- unifyTerms' su e' (AppEff ((AppEff (EffVar (Eff t)) (EffVar (Src x ty)))) (EffVar (Src x' ty')))
+--   | t `notElem` dom su &&
+--     not (occurs t e')
+--   = let su' = su `catSubst` [(t, (AbsEff (Src x ty) (AbsEff (Src x' ty') e')))] in
+--     (su', sub su' e')
+-- unifyTerms' su (AppEff ((AppEff (EffVar (Eff t)) (EffVar (Src x ty)))) (EffVar (Src x' ty'))) e'
+--   | t `notElem` dom su &&
+--     not (occurs t e')
+--   = let su' = su `catSubst` [(t, (AbsEff (Src x ty) (AbsEff (Src x' ty') e')))] in
+--     (su', sub su' e')
+
+unifyTerms' su e1 e2
   | Just (su, e) <- unifyRecursive su e1 e2
   = (su, e)
--- unifyTerms su (AppEff (EffVar (Eff t)) (EffVar (Src x ty))) e'
---   | t `notElem` dom su
---   = let su' = su `catSubst` mu
---         bdy = AbsEff (Src x ty) e'
---         mu  = [(t, Mu t bdy)]
---     in (su', AppEff (Mu t bdy) (EffVar (Src x ty)))
-unifyTerms su (AbsEff (Src s ty) e) (AbsEff (Src s' ty') e')
+unifyTerms' su (AbsEff (Src s ty) e) (AbsEff (Src s' ty') e')
   | isNothing ty || isNothing ty' || ty == ty'
   = let (su', t') = unifyTerms su (sub [(s, s')] e) e'
         ty'' = getFirst (First ty <> First ty')
     in (su', AbsEff (Src s' ty'') t')
-unifyTerms su (AbsEff (Eff s) e) (AbsEff (Eff s') e')
+unifyTerms' su (AbsEff (Eff s) e) (AbsEff (Eff s') e')
   | s == s'
     = let (su', t') = unifyTerms su e e' in
     (su', AbsEff (Eff s') t')
-unifyTerms su (AppEff m n) (AppEff m' n')
+unifyTerms' su (AppEff m n) (AppEff m' n')
   = let (su', m'')  = unifyTerms su m m'
         (su'', n'') = unifyTerms su' (sub su' n) (sub su' n')
     in  (su'', AppEff m'' n'')
-unifyTerms su (Pend e s) (Pend e' s')
-  = let (su, e'') = unifyTerms su e e' in
-    (su, Pend e'' s)
-unifyTerms su (Pend e s) e'
-  = unifyTerms su e e'
-unifyTerms su e (Pend e' s)
-  = unifyTerms su e e'
-unifyTerms su (NonDet es) (NonDet es')
+unifyTerms' su (NonDet es) (NonDet es')
   = (su', NonDet es')
     where
       (su', es') = L.foldr go (su, []) (zip es es')
       go (e,e') (su, es) = let (su', e'') = unifyTerms su e e' in
                            (su', e'':es)
-unifyTerms sub e@(EffVar x) (EffVar y)
-  | x == y
+unifyTerms' sub e@(EffVar x) (EffVar y)
+  | symbol x == symbol y
   = (sub, e) -- should probably check these are the same!!!!
-unifyTerms sub t@(EffLit t1) (EffLit t2)
+unifyTerms' sub t@(EffLit t1) (EffLit t2)
   = (sub, t)
-unifyTerms su (Bind m1 n1) (Bind m2 n2)
+unifyTerms' su (Bind m1 n1) (Bind m2 n2)
   = let (su', m)  = unifyTerms su m1 m2
         (su'', n) = unifyTerms su' (sub su' n1) (sub su' n2)
     in (su'', Bind m n)
-unifyTerms sub t1 t2
-  = error oops  -- (printEff t1) (printEff t2))
+unifyTerms' sub t1 t2
+  = error oops
   where
     oops :: String
     oops = (printf "%s unifyTerm %s" (printEffTerm t1) (printEffTerm t2))
 
+unifyApply su (AppEff m n) (AppEff m' n')            
+  = Just (su'', AppEff m'' n'')
+  where
+    (su', m'') = unifyTerms su m m'
+    (su'', n'') = unifyTerms su' n n'
+unifyApply su e@(AppEff m n) e'
+  | (EffVar (Eff f), as) <- unwrapApply e,
+    (xs, [])             <- collectArgs as,
+    f `notElem` dom su && not (occurs f e')
+  = let fun = L.foldr AbsEff e' (trace "xs" xs)
+        su' = su `catSubst` [(f, fun)]
+    in Just (su', fun)
+-- unifyApply su e e'@(AppEff m n)
+--   = unifyApply su e' e
+unifyApply _ _ _
+  = Nothing
+
 unifyRecursive su e@(AppEff m n) e'
+  -- | (EffVar (Eff f), as)   <- unwrapApply e,
+  --   (EffVar (Eff f'), as') <- unwrapApply e',
+  --   f == f'
+  -- = Nothing
   | (EffVar (Eff f), as) <- unwrapApply e,
     (xs, [])             <- collectArgs as, 
     f `notElem` dom su && occurs f e'
@@ -486,7 +541,12 @@ collectArgs :: [Effect] -> ([Binder], [Effect])
 collectArgs = go []
   where
     go xs (EffVar x@(Src _ _):xs') = go (x:xs) xs'
+    go xs ((Pend e i):xs')
+      | Just x <- extract e = go (x:xs) xs'
     go xs xs'                      = (reverse xs, xs')
+    extract (Pend e i)           = extract e
+    extract (EffVar x@(Src _ _)) = Just x
+    extract _                    = Nothing
 
 -- unifyTerms su (AppEff (EffVar (Eff t)) (EffVar (Src x ty))) e'
 --   | t `notElem` dom su
@@ -501,8 +561,6 @@ thd3 (_,_,z) = z
 -- This isn't right!!!!
 joinEffects _ _ _ []
   = return noEff
-joinEffects _ _ _ [(_,_,e)]
-  = return e
 joinEffects _ _ _ es@((_,_,EffNone):_)
   = if length es /= length ets
              then foldM unifyTysM EffNone ets

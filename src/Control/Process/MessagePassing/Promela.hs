@@ -248,14 +248,12 @@ promelaEffect :: Effect -> PM Doc
 promelaEffect e = do recCall <- maybeRecursiveCall e
                      go recCall e
   where
-    go r (Pend e i)
-      = do vs <- gets vars
-           env <- promelaInfo i
-           vs' <- gets vars
-           k   <- go r e
-           return (env $+$ k)
     go (Just (x, f, xs, ls, as)) _
       = promelaRecursiveCall x f xs ls as
+    go _ (Pend e i)
+      = do env <- promelaInfo (tracepp "info" i)
+           k   <- promelaEffect e
+           return (env $+$ k)
     go _ (maybeSend -> Just (p,m))
       = promelaSend p m
     go _ (maybeRecursive -> Just (x, bdy, (fs,as), k, me))
@@ -401,9 +399,9 @@ promelaNu c e1 e2
 
 promelaBind :: Effect -> (Fp.Symbol, Maybe Type) -> Effect -> PM Doc
 promelaBind (Pend e1 i) (x,t) e2
-  = promelaBind e1 (x,t) e2
-promelaBind e1 (x,t) (Pend e2 i)
-  = promelaBind e1 (x,t) e2
+  = do env <- promelaInfo i
+       k   <- promelaBind e1 (x,t) e2
+       return (env $+$ k)
 promelaBind e1 (x,t) e2
   | Just (p,m) <- maybeSend e1
   = do d1 <- promelaSend p m
@@ -466,7 +464,7 @@ promelaSend p m
 -- This is the initial call to a recursive function.
 -- Need to create a stack, set up first activation record,
 -- then render the body of the function
-promelaRecursive x bdy (fs,as) (AbsEff ret@(Src r (Just t)) k) me
+promelaRecursive x bdy (fs,as) (AbsEff ret@(Src r _) k) me
   = do vs           <- gets vars
        i            <- gets n
        labels       <- gets rec_label
@@ -478,6 +476,7 @@ promelaRecursive x bdy (fs,as) (AbsEff ret@(Src r (Just t)) k) me
                         , rec_label = (x,0):rec_label s
                         , rec_ctxt = f : rec_ctxt s
                         }
+       oldchunks    <- gets rec_stack
        body         <- promelaEffect bdy
        modify $ \s -> s { vars = vs
                         , rec_label = labels
@@ -518,6 +517,7 @@ promelaRecursive x bdy (fs,as) (AbsEff ret@(Src r (Just t)) k) me
                   loop
        modify $ \s -> s { vars = validVars (r : argXs ++ vars s) }
        kont <- promelaEffect k
+       modify $ \s -> s { rec_stack = oldchunks }
        return $ call                      $+$
                 promelaMaybeDecl r retVar $+$
                 kont
@@ -814,7 +814,6 @@ maybeRecursive = go [] []
       = Nothing
 
 maybeRecursiveCall :: Effect -> PM (Maybe (Fp.Symbol, Fp.Symbol, [Binder], [Fp.Symbol], [Effect]))
-maybeRecursiveCall (Pend e i) = maybeRecursiveCall e
 maybeRecursiveCall (breakArgs -> Just (EffVar (Eff x), as))
   = do rs <- gets rec_funs
        return . fmap go $ find p rs

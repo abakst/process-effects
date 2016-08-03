@@ -35,7 +35,7 @@ bindEffect [_,a,b] x
              $ EPi actSym (EffTerm (EffVar (Eff e0Sym)))
              $ EPi fSym
                  (EPi xSym noEff
-                        (EffTerm (EffVar (Eff e1Sym))))
+                        (EffTerm (absEff (Src actSym Nothing) (EffVar (Eff e1Sym)))))
                  (EffTerm (absEff (Src actSym Nothing)
                           (absEff (Src fSym Nothing)
                           (effBindF
@@ -60,7 +60,7 @@ thenEffect [_,a,b]
   = ETermAbs e0Sym
              $ ETermAbs e1Sym
              $ EPi fSym (EffTerm (EffVar (Eff e0Sym)))
-             $ EPi gSym (EffTerm (EffVar (Eff e1Sym)))
+             $ EPi gSym (EffTerm (absEff (Src fSym Nothing) (EffVar (Eff e1Sym))))
              $ EffTerm (absEff (Src fSym Nothing) (absEff (Src gSym Nothing)
                                  (effBindF (AppEff (AppEff (EffVar (Eff e0Sym))
                                               (AbsEff (Src (symbol "_") tyA)
