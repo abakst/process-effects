@@ -1,0 +1,1 @@
+../test/tc/pos/pingPong.hs
