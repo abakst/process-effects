@@ -69,7 +69,18 @@ recvDef = text "#define recv(i,ty,msg) mbuf[i*max_procs + _pid]??ty,msg"
 assumeDef :: Doc
 assumeDef = text "#define assume(_p) do :: _p -> break :: else -> skip od"
 
-stackSize = int 16
+stackSize = text "STACKSZ"
+heapSize  = text "HEAPSZ"
+
+heapSizeDef :: Doc
+heapSizeDef = text "#ifndef HEAPSZ"    $+$
+              text "#define HEAPSZ 16" $+$
+              text "#endif"
+
+stackSizeDef :: Doc
+stackSizeDef = text "#ifndef STACKSZ"    $+$
+              text "#define STACKSZ 16" $+$
+              text "#endif"
 
 promelaProgram :: Int -> Effect -> Doc
 promelaProgram n eff
@@ -77,6 +88,8 @@ promelaProgram n eff
     sendDef             $+$
     recvDef             $+$
     assumeDef           $+$
+    heapSizeDef         $+$
+    stackSizeDef        $+$
     mtype               $+$
     types               $+$
     records             $+$
@@ -100,7 +113,7 @@ promelaProgram n eff
     allts  = nub (tyInfos (snd <$> boundTys eff))
     tinfos = [t | t@TypeInfo {} <- allts]
     heaps  = vcat $ goHeap  <$> tinfos
-    goHeap ti = heapDecl 10 (tyname ti)
+    goHeap ti = heapDecl (tyname ti)
     pidCtr = ptrType <+> promela pidCtrName
          <+> equals <+> int 1 <> semi
 
@@ -162,9 +175,9 @@ tableDecl :: Int -> TypeInfo -> Doc
 tableDecl n ti
   = ptrType <+> tableName ti <> brackets (int n) <> semi
 
-heapDecl :: Int -> Fp.Symbol -> Doc
-heapDecl n ti
-  = promela ti <+> heapName ti <> brackets (int n) <> semi $+$
+heapDecl :: Fp.Symbol -> Doc
+heapDecl ti
+  = promela ti <+> heapName ti <> brackets heapSize <> semi $+$
     ptrType <+> heapPtrName ti <+> equals <+> int 0 <> semi
 
 tableName :: TypeInfo -> Doc
@@ -797,20 +810,23 @@ maybeRecv _
   = Nothing
 
 maybeRecursive :: Effect -> Maybe (Symbol, Effect, ([Binder], [Effect]), Effect, Fp.Symbol)
-maybeRecursive = go [] []
+maybeRecursive = go [] [] []
   where
-    go fs as (Mu x (AbsEff f bdy))
-      = go (f:fs) as (Mu x bdy)
-    go fs as (Mu x bdy)
-      = Just (x, sub [(me, meArg)] bdy, (reverse fs', as'), kArg, me)
+    go fs is as (Mu x (AbsEff f bdy))
+      = go (f:fs) is as (Mu x bdy)
+    go fs is as (Mu x (Pend e i))
+      = go fs (i:is) as (Mu x e)
+    go fs is as (Mu x bdy)
+      = Just (x, sub [(me, meArg)] infoBody, (reverse fs', as'), kArg, me)
       where
+        infoBody = foldl' Pend bdy is
         fs'  = drop 2 fs
-        [(Src me _), k] = take 2 fs
+        [(Src me _), k] = take 2 (tracepp "fs" fs)
         as'  = take (length as - 2) as
         [kArg, EffVar (Src meArg _)] = drop (length as - 2) as
-    go [] as (AppEff x e)
-      = go [] (e:as) x
-    go _ _ _
+    go [] is as (AppEff x e)
+      = go [] is (e:as) x
+    go _ _ _ _
       = Nothing
 
 maybeRecursiveCall :: Effect -> PM (Maybe (Fp.Symbol, Fp.Symbol, [Binder], [Fp.Symbol], [Effect]))

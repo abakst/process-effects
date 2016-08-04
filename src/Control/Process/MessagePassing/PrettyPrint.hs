@@ -32,7 +32,7 @@ instance Pretty Fp.Symbol where
 
 maybeAnnot :: Info -> Doc -> Doc                   
 maybeAnnot i@(Info (x,_,Fp.RR so (Fp.Reft (vv,p)))) d
-  = if not $ Fp.isTautoPred p then
+  = if True {- not $ Fp.isTautoPred p -} then
       braces (d <+> text "where" <+> 
                          Fp.pprint (Fp.subst1 p (vv, Fp.expr (symbol x))))
      else
