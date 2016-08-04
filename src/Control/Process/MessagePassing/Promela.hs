@@ -264,7 +264,7 @@ promelaEffect e = do recCall <- maybeRecursiveCall e
     go (Just (x, f, xs, ls, as)) _
       = promelaRecursiveCall x f xs ls as
     go _ (Pend e i)
-      = do env <- promelaInfo (tracepp "info" i)
+      = do env <- promelaInfo i
            k   <- promelaEffect e
            return (env $+$ k)
     go _ (maybeSend -> Just (p,m))
