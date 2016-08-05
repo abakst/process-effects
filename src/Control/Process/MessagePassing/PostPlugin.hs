@@ -9,13 +9,14 @@ import Text.PrettyPrint.HughesPJ hiding ((<$>))
 import HscTypes hiding (lookupType)
 import Annotations
 import DynFlags
+import StaticFlags
 
 import Control.Process.MessagePassing.Effects
 import Control.Process.MessagePassing.EffectTypes
 
-import Language.Haskell.Liquid.Types hiding (config)
+import Language.Haskell.Liquid.Types hiding (config, target)
 import Language.Haskell.Liquid.Types.RefType
-import Language.Haskell.Liquid.Plugin as P
+import Language.Haskell.Liquid.Plugin as P hiding (target)
 import Language.Haskell.Liquid.GHC.Misc
 import Language.Haskell.Liquid.UX.Tidy
 
@@ -32,21 +33,29 @@ doEffects :: AnnInfo SpecType -> ReaderT PluginEnv IO ()
 doEffects (AI m)
   = do core <- reader P.cbs
        hsenv <- env <$> reader ghcInfo
+       info  <- reader ghcInfo
+       let sp  = spec info
+       mod   <- targetMod <$> reader ghcInfo
        emb <- reader embed
        f:_  <- files <$> reader config
-       let annmap = (rTypeSortedReft emb . snd <$>) <$> m
+       let annmap = (snd <$>) <$> m
            tmpdir = tempDirectory f
        liftIO $ do
+         initStaticOpts
          setUnsafeGlobalDynFlags (extractDynFlags hsenv)
          annenv <- prepareAnnotations hsenv Nothing
+         let assm0 = (val <$>) <$> asmSigs sp
+             assm1 = [ (x,val t) | (x,t) <- tySigs sp, x `elem` impVars info ]
          oblig  <- 
            evalStateT (synthEffects M.empty core) EffState { ctr = 0
                                                            , annots = annmap
                                                            , annenv = annenv
                                                            , tyconEmb = emb
+                                                           , target = mod
                                                            , esubst = []
                                                            , tsubst = []
                                                            , hsenv = hsenv
+                                                           , assms = assm0 ++ assm1
                                                            }
          case oblig of
            Just o  -> write tmpdir o

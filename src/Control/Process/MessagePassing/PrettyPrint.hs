@@ -1,5 +1,7 @@
+{-# LANGUAGE ViewPatterns #-}
 module Control.Process.MessagePassing.PrettyPrint where
 
+import           DataCon
 import           DataCon
 import           Control.Process.MessagePassing.EffectTypes
 import           Text.PrettyPrint.HughesPJ hiding ((<$>))
@@ -31,15 +33,15 @@ instance Pretty Fp.Symbol where
   pprintPrec _ s = text (symbolString s)
 
 maybeAnnot :: Info -> Doc -> Doc                   
-maybeAnnot i@(Info (x,_,Fp.RR so (Fp.Reft (vv,p)))) d
-  = if True {- not $ Fp.isTautoPred p -} then
-      braces (d <+> text "where" <+> 
-                         Fp.pprint (Fp.subst1 p (vv, Fp.expr (symbol x))))
+maybeAnnot i@(Info x _ (Rt.rTypeReft -> Fp.Reft (vv,p)) g) d
+  = if not $ Fp.isTautoPred p then
+      braces (d <+> text "where" <+>
+              Fp.pprint (Fp.subst1 p (vv, Fp.expr (symbol x))))
      else
        d
 
 instance Pretty Info where
-  pprintPrec _ (Info (x,_,reft))
+  pprintPrec _ (Info x _ reft _)
     = Fp.pprint (x, reft)
 
 instance Pretty Effect where
@@ -54,7 +56,7 @@ instance Pretty Effect where
       hcat (punctuate (text " □ ") (pprintPrec (za+1) <$> es))
     where
       za = 2
-  pprintPrec z (Assume i@(Info (s,_,_)) (c,bs) e)
+  pprintPrec z (Assume i@(Info s _ _ _) (c,bs) e)
     = parensIf (z > za) $
       text "case" <+> maybeAnnot i (pprintPrec 0 s) <+> text "of" <+>
            parens (pprintPrec 0 (symbol (dataConName c)) <+> hsep (pprintPrec 0 <$> bs)) <+> text "->"

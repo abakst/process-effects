@@ -53,7 +53,7 @@ send p m = undefined
 recv :: RecvMsg m => Process m
 recv = undefined
 
-{-# ANN getSelfPid "{ \\$K.\\me. ($K me) }" #-}
+{-# ANN getSelfPid "{ \\$K.\\me. $K me }" #-}
 {-@ getSelfPid :: Process {v:Pid | validPid v} @-}
 getSelfPid :: Process Pid
 getSelfPid = undefined

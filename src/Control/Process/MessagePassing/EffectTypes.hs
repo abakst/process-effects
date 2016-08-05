@@ -24,6 +24,7 @@ module Control.Process.MessagePassing.EffectTypes (
   , unwrapApply
   , occurs
   , localVars
+  , fst3, snd3, thd3
   ) where
 
 import Debug.Trace
@@ -35,6 +36,7 @@ import           Annotations
 import           Data.Function
 import           Data.List
 import qualified Data.HashMap.Strict as H
+import qualified Data.Map.Strict as M
 import           Control.Monad.Reader
 import           Control.Monad.State
 import           Text.Printf
@@ -47,8 +49,14 @@ debug s x = trace (s ++ ": " ++ show x) x
 data Binder = Src Symbol (Maybe Type)
             | Eff Symbol
               deriving (Eq, Data)
-newtype Info = Info (Symbol, Type, SortedReft)      
+
+data Info = Info { infoSym  :: Symbol
+                 , infoTy   :: Type
+                 , infoReft :: SpecType
+                 , infoEnv  :: M.Map Var (Maybe SpecType)
+                 }
   deriving (Data)
+
 data Effect = EffLit String
             | AppEff Effect Effect
             | AbsEff Binder Effect
@@ -73,12 +81,14 @@ data EffTy  = EPi Symbol EffTy EffTy
 
 data EffState = EffState {
     ctr      :: Int
-  , annots   :: H.HashMap SrcSpan [SortedReft]
+  , annots   :: H.HashMap SrcSpan [SpecType]
   , hsenv    :: HscEnv
+  , assms    :: [(Var, SpecType)]
   , annenv   :: AnnEnv
   , tyconEmb :: TCEmb TyCon
   , tsubst   :: [(Symbol, EffTy)]
   , esubst   :: [(Symbol, Effect)]
+  , target   :: ModuleName
   }
 type EffectM a = StateT EffState IO a
 
@@ -284,13 +294,13 @@ instance EffectSubst Info EffTy where
     = genericSubstTy (\v _ -> ETyVar v) go goInfo goCase su
     where
       goCase su x
-        = withMatch su x x (\_ (Info (x',_,_)) -> x')
+        = withMatch su x x (\_ (Info x' _ _ _) -> x')
       goInfo su (x,t)
-        = withMatch su x (x,t) (\_ (Info (x', ty, p)) -> (x',p))
+        = withMatch su x (x,t) (\_ (Info x' ty p _) -> (x',p))
       go b@(Eff _) _
         = EffVar b
-      go b@(Src _ ty) (Info (i, ty', t))
-        = Pend (EffVar (Src (symbol i) (Just ty'))) (Info (i, ty', t))
+      go b@(Src _ ty) (Info i ty' t g)
+        = Pend (EffVar (Src (symbol i) (Just ty'))) (Info i ty' t g)
 
 dom :: [(Symbol, a)] -> [Symbol]
 dom = (fst <$>)
@@ -321,7 +331,7 @@ genericSubstTy f g h cf = go
 
 genericSubst :: (Binder -> b -> Effect)
              -> ([(Symbol, b)] -> Symbol -> Symbol)
-             -> ([(Symbol, b)] -> (Symbol, SortedReft) -> (Symbol, SortedReft))
+             -> ([(Symbol, b)] -> (Symbol, SpecType) -> (Symbol, SpecType))
              -> [(Symbol, b)]
              -> Effect
              -> Effect
@@ -343,11 +353,11 @@ genericSubst f g h = goTerm
       = Bind (goTerm su m) (goTerm su f)
     goTerm su (Par p q)
       = Par (goTerm su p) (goTerm su q)
-    goTerm su (Assume (Info (x,ty,p)) (c, bs) e)
-      = Assume (Info (x',ty,p')) (c, bs) (goTerm su e)
+    goTerm su (Assume (Info x ty p env) (c, bs) e)
+      = Assume (Info x' ty p' env) (c, bs) (goTerm su e)
         where (x',p') = h su (x,p)
-    goTerm su (Pend e (Info (x,ty,p)))
-      = Pend (goTerm su e) (Info (x',ty,p'))
+    goTerm su (Pend e (Info x ty p env))
+      = Pend (goTerm su e) (Info x' ty p' ((substf (expr . g su) <$>) <$> env))
         where (x',p') = h su (x,p)
     goTerm su (Mu s e)
       = Mu (g su s) (goTerm (restrict su (symbol s)) e)
@@ -384,3 +394,7 @@ localVars = nub . go
     go (Mu _ e)
       = go e
     go _ = []
+
+fst3 (x,_,_) = x
+snd3 (_,y,_) = y
+thd3 (_,_,z) = z           
