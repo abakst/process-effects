@@ -17,9 +17,10 @@ import           Data.List
 import           Data.Maybe
 import           Data.Generics hiding (TyCon, empty)
 import           Data.Function
+import qualified Data.Map.Strict as M
 import qualified Language.Fixpoint.Types as Fp
+import qualified Language.Haskell.Liquid.Types as R
 import           Text.PrettyPrint.HughesPJ hiding ((<$>))
-
 import           Control.Process.MessagePassing.EffectTypes
 import           Control.Process.MessagePassing.PrettyPrint
 
@@ -275,6 +276,8 @@ promelaEffect e = do recCall <- maybeRecursiveCall e
       = promelaNu x e1 e2
     go _ (Bind m (AbsEff (Src x t) n))
       = promelaBind m (x,t) n
+    go _ (Bind m g)
+      = error (printf "What %s\n" (render (pretty g)))
     go _ (NonDet es)
       = promelaNonDet es
     go _ (Assume i unfolds e)
@@ -321,14 +324,46 @@ formalsList = parens . hcat . punctuate semi . fmap go
 validVars = nub . filter (\v -> symbolString v /= "_")
 
 promelaInfo :: Info -> PM Doc
-promelaInfo i@(Info (x,ty,φ))
+promelaInfo i@(Info x ty φ γ) -- yes unicode. sue me.
   = do env <- gets vars
-       let (z,_,d) = promelaVal env (Pend (EffVar (Src x (Just ty))) i)
-       case d of
-         Nothing   -> return empty
-         Just zdec -> do
-                modify $ \s -> s { vars = validVars (z : env) }
-                return zdec
+       let (ds0,env0) = foldr go ([],env) $ [ (Fp.symbol x',t)
+                                            | (x', Just t) <- bs
+                                            , x /= Fp.symbol x'
+                                            ]
+           bs         = M.toList γ
+           (z,_,d) = promelaVal env0 (Pend (EffVar (Src x (Just ty))) i)
+           ds      = ds0 ++ if x `notElem` env then [d] else []
+       modify $ \s -> s { vars = maybe env0 (const (validVars $ (z : env0))) d }
+       case catMaybes ds of
+         [] -> return empty
+         xs -> return $ text "/* from promelaInfo */" $+$ foldl1 seqst xs
+  where
+    seqst d1 d2 = d1 $+$ d2
+    go (x,t) (docs, xs)
+      | x `notElem` xs, Just (z,Just d) <- bindVal xs (x,t)
+      = (Just d:docs, x:xs)
+      | otherwise
+      = (docs, xs)
+    bindVal xs (x,t)
+      | Just ty <- extractTy t
+      = let (z,_,d) = promelaVal xs (pendBind ty (x,t))
+        in Just (z,d)
+      | otherwise
+      = Nothing
+    extractTy :: R.SpecType -> Maybe Type
+    extractTy t@(R.RApp (R.RTyCon{R.rtc_tc = c}) _ _ _)
+      | null (tyConDataCons c)
+      = Nothing -- error (printf "extractTy: TBD %s" (Fp.showpp t))
+      | otherwise
+      = Just (dataConOrigResTy . head $ tyConDataCons c)
+    extractTy (R.RAppTy{R.rt_arg = a})
+      = extractTy a
+    extractTy t
+      = Nothing
+    pendBind ty (x,t)
+      = Pend (EffVar (Src x (Just ty))) (infoBind ty (x,t))
+    infoBind ty (x,t)
+      = Info x ty t γ
 
 makeNonDet ds
   = text "if" $+$ nest 2 (vcat ds') $+$ text "fi"
@@ -345,14 +380,14 @@ promelaNonDet es
               modify $ \s -> s { vars = vs }
               return d
 
-promelaAssume i@(Info (x,ty,reft)) (c,ys) e
+promelaAssume i@(Info x ty reft g) (c,ys) e
   | PrimType {tyname = t} <- tyInfo ty,
     (Just d) <- maybeCompare i
   = do e' <- promelaEffect e
        let x = if getUnique c == trueDataConKey
                then d else text "!" <> parens d
        return $ x <+> text "->" <+> braces e'
-promelaAssume (Info (x,ty,reft)) (c,ys) e
+promelaAssume (Info x ty reft g) (c,ys) e
   = do modify $ \s -> s { vars = validVars ys ++ vars s }
        d <- promelaEffect e
        return $ assm $+$ nest 2 (braces (decls $+$ d))
@@ -368,7 +403,7 @@ promelaAssume (Info (x,ty,reft)) (c,ys) e
     t           = tyname (tyInfo ty)
 
 maybeCompare :: Info -> Maybe Doc
-maybeCompare (Info (x,ty,reft@(Fp.RR _ (Fp.Reft(vv,_)))))
+maybeCompare (Info x ty (R.rTypeReft -> reft) g)
   = case extractPropPreds go reft of
       c:_ -> Just c
       _   -> Nothing
@@ -411,9 +446,10 @@ promelaNu c e1 e2
          d
 
 promelaBind :: Effect -> (Fp.Symbol, Maybe Type) -> Effect -> PM Doc
-promelaBind (Pend e1 i) (x,t) e2
+promelaBind (Pend e1 i@(Info _ _ _ g)) (x,t) e2
   = do env <- promelaInfo i
-       k   <- promelaBind e1 (x,t) e2
+       let f = Fp.tracepp "Gamma" <$> g
+       k   <- f `seq`  promelaBind e1 (x,t) e2
        return (env $+$ k)
 promelaBind e1 (x,t) e2
   | Just (p,m) <- maybeSend e1
@@ -422,7 +458,13 @@ promelaBind e1 (x,t) e2
        return $ (d1 <> semi $+$ d2)
   | Just p <- maybeRecv e1
     = promelaRecv p (x,t) e2
-  | otherwise
+promelaBind (AppEff (EffVar (Src f _)) (EffVar (Src v _))) (x,t) e2
+  | symbolString f == "return"
+  = do vs <- gets vars
+       modify $ \s -> s { vars = validVars (x : vs) }
+       k <- promelaEffect e2
+       return (if x `notElem` vs then ptrType else empty <+> promela x <+> equals <+> promela v $+$ k)
+promelaBind e1 (x,t) e2
   = error (printf "promelaBind: %s" (render $ pretty (Bind e1 (AbsEff (Src x t) e2))))
 
 promelaRVal :: Effect -> Doc
@@ -671,7 +713,7 @@ promelaVal env (Pend (EffVar (Src x (Just t))) info) -- Possibly an expression?
   = (x, t, Just d)
   | otherwise
   = promelaVal env $ EffVar (Src x (Just t))
-promelaVal env (Pend e (Info (x,t,_)))
+promelaVal env (Pend e (Info  x t _ g))
   = promelaVal env (EffVar (Src x (Just t)))
 promelaVal env e = error (printf "\n\n*****promelaVal:\n%s\n******\n\n" (render (pretty e)))
 
@@ -740,24 +782,24 @@ maybeInfoVal env x (maybeExpr -> Just e)
 maybeInfoVal env x _
   = Nothing
 
-eqpreds :: Fp.SortedReft -> [Fp.Expr]
-eqpreds (Fp.RR _ (Fp.Reft (vv,e)))
+eqpreds :: Fp.Reft -> [Fp.Expr]
+eqpreds (Fp.Reft (vv,e))
   = [ e' | (Fp.PAtom Fp.Eq (Fp.EVar vv) e') <- Fp.conjuncts e ]
 
-propPreds :: Fp.SortedReft -> [Fp.Expr]
-propPreds (Fp.RR _ (Fp.Reft (vv,e)))
+propPreds :: Fp.Reft -> [Fp.Expr]
+propPreds (Fp.Reft (vv,e))
   = [ e' | (Fp.PIff x e') <- Fp.conjuncts e, x == Fp.eProp vv ]
 
-extractPreds :: (Fp.Expr -> Maybe a) -> Fp.SortedReft -> [a]
+extractPreds :: (Fp.Expr -> Maybe a) -> Fp.Reft -> [a]
 extractPreds f e
   = catMaybes (f <$> eqpreds e)
 
-extractPropPreds :: (Fp.Expr -> Maybe a) -> Fp.SortedReft -> [a]
+extractPropPreds :: (Fp.Expr -> Maybe a) -> Fp.Reft -> [a]
 extractPropPreds f e
   = catMaybes (f <$> propPreds e)
 
 maybeExpr :: Info -> Maybe Doc
-maybeExpr (Info (x,ty,reft))
+maybeExpr (Info x ty (R.rTypeReft -> reft) g)
   = case extractPreds go reft of
       c:_ -> Just c
       _    -> Nothing
@@ -775,8 +817,8 @@ maybeExpr (Info (x,ty,reft))
     goOp Fp.Minus = Just $ text "-"
     goOp _ = Nothing
 maybeInt :: Info -> Maybe Int
-maybeInt (Info (x,ty,reft))
-  = case extractPreds go reft of
+maybeInt (Info x ty reft g)
+  = case extractPreds go (R.rTypeReft reft) of
       c:_ -> Just c
       _   -> Nothing
   where
@@ -784,9 +826,9 @@ maybeInt (Info (x,ty,reft))
     go (Fp.ECon (Fp.I i)) = return (fromInteger i)
     go _ = Nothing
 maybeCstrApp :: Info -> Maybe (CstrInfo, [Fp.Expr])
-maybeCstrApp (Info (x,ty, reft))
-  = case extractPreds go reft of
-      [c] -> Just c
+maybeCstrApp (Info x ty reft g)
+  = case extractPreds go (R.rTypeReft reft) of
+      c:_ -> Just c
       _   -> Nothing
   where
     go (Fp.splitEApp -> (Fp.EVar f, as)) =
@@ -888,7 +930,7 @@ type Arg    = Type
 
 cstrFor :: Fp.Symbol -> Type -> Maybe CstrInfo
 cstrFor f (tyInfo -> tinfo@TypeInfo{})
-  = case [ ci | ci <- cinfo tinfo, cname ci == f ] of
+  = case [ ci | ci <- cinfo tinfo, (cname ci) == f ] of
       [ci] -> Just ci
       []   -> Nothing
 cstrFor _ _

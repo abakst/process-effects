@@ -5,14 +5,15 @@ import Debug.Trace
 import Data.Maybe
 import Data.Monoid
 import Data.List as L
-import Data.Map.Strict as M
 import Data.HashMap.Strict as H
+import Data.Map.Strict as M
 import Control.Monad.State
 import Text.PrettyPrint.HughesPJ hiding ((<>))
 import Text.Printf
 import System.IO.Unsafe
 
 import GHC
+import Id
 import Var
 import Type
 import DataCon
@@ -35,9 +36,11 @@ import Control.Process.MessagePassing.Promela
 import Control.Process.MessagePassing.PrettyPrint
 import Control.Process.MessagePassing.Parse
 
-import Language.Haskell.Liquid.Types
+import Language.Haskell.Liquid.Types hiding (target)
+import Language.Haskell.Liquid.Transforms.CoreToLogic (mkLit)
+import Language.Haskell.Liquid.Types.Literals
 import Language.Haskell.Liquid.Types.RefType
-import Language.Haskell.Liquid.Plugin as P
+import Language.Haskell.Liquid.Plugin as P hiding (target)
 import Language.Haskell.Liquid.GHC.Misc
 
 import Language.Fixpoint.Types hiding (PPrint(..), SrcSpan(..), ECon) 
@@ -96,32 +99,34 @@ printEff (EffTerm t)
   = printf "{ %s }" (printEffTerm t)
 
 type Obligation = Doc
-synthEffects :: EffEnv -> [CoreBind] -> EffectM (Maybe Obligation)
+synthEffects :: EffEnv SpecType -> [CoreBind] -> EffectM (Maybe Obligation)
 synthEffects g []
-  = case lookupString g "main" of
-      Just e ->  return $ Just (promela e)
-      Nothing -> return Nothing
+  = do case lookupString g "main" of
+         Just e ->  return $ Just (promela e)
+         Nothing -> return Nothing
 synthEffects g (cb:cbs)
-  = do g' <- synth1Effect g cb
+  = do ann <- gets annots
+       g' <- synth1Effect g cb
        synthEffects g' cbs
 
-synth1Effect :: EffEnv -> CoreBind -> EffectM EffEnv 
+synth1Effect :: EffEnv SpecType -> CoreBind -> EffectM (EffEnv SpecType)
 synth1Effect g (NonRec b e)
-  = do et  <-  applySubstM =<< synthEff g e
-       g'  <-  mapM applySubstM g
+  = do (et, p)  <- synthEff g e
+       et       <- applySubstM et
+       g'  <-  mapM applySubstBinding g
        let egen = generalizeEff g' (betaReduceTy et)
-       liftIO $ putStrLn (printf "%s : %s" (symbolString . symbol $ b) (printEff egen))
+       liftIO $ putStrLn (printf "%s : %s %s" (symbolString . symbol $ b) (printEff egen) (showpp p)) 
        let tys = L.nub . tyInfos $ snd <$> tyBoundTys egen
-       return (M.insert (getName b) egen g')
+       return (extend g' b egen p)
 
 synth1Effect g (Rec [(b,e)])              
-  = do et1 <- defaultEff (CoreUtils.exprType e)
-       et2 <- synthEff (M.insert (getName b) et1 g) e
-       et  <- unifyTysM et1 et2
-       g'  <- mapM applySubstM g
+  = do et1      <- defaultEff (CoreUtils.exprType e)
+       (et2, p) <- synthEff (extend g b et1 Nothing) e
+       et       <- unifyTysM et1 et2
+       g'       <- mapM applySubstBinding g
        let egen = generalizeEff g' (betaReduceTy et)
-       liftIO $ putStrLn (printf "%s : %s" (symbolString . symbol $ b) (printEff egen))
-       return (M.insert (getName b) egen g')
+       liftIO $ putStrLn (printf "%s : %s %s" (symbolString . symbol $ b) (printEff egen) (showpp p))
+       return (extend g' b egen p)
 
 bkFun :: Type -> Maybe ([TyVar], [Type], Type)
 bkFun t
@@ -207,17 +212,26 @@ isEffectType t
            return $ "effects" `elem` as
          _ -> return False
 
-synthEff :: EffEnv -> CoreExpr -> EffectM EffTy
+synthEff :: EffEnv SpecType -> CoreExpr -> EffectM (EffTy, Maybe SpecType)
 synthEff g e@(Var x)
   = do effEnv     <- First        <$> lookupEffTy g x
        builtinEff <- First        <$> builtinEffect x
        def        <- First . Just <$> defaultEff (CoreUtils.exprType e)
-       let eff = fromMaybe err . getFirst $ effEnv <> builtinEff <> def
-       freshFnEff eff
+       r          <- First        <$> lookupAssm x
+       envreft    <- First        <$> lookupReft g x
+       reft0      <- First . Just <$> lookupSortedReft e
+       let eff  = fromMaybe err . getFirst $ effEnv <> builtinEff <> def
+           reft = fromMaybe err . getFirst $ envreft <> reft0
+       liftIO $ putStrLn (printf "%s ::: %s %s\n" (Fp.showpp (symbol x)) (Fp.showpp (getFirst r)) (Fp.showpp reft))
+       eff <- freshFnEff eff
+       return (eff, Just reft)
   where
     err = error $ printf "Can't find an eff for %s" (symbolString (symbol x))
-synthEff g (Tick _ e)
-  = synthEff g e
+synthEff g eff@(Tick _ e)
+  = do (et, p) <- synthEff g e
+       reft    <- lookupSortedReft eff
+       liftIO $ putStrLn (printf "tick reft is %s\n" (showpp reft))
+       return (et, p `meetTys` Just reft)
 -- synthEff g e@(App e1 e2)
 --   = undefined -- synthApp g e x
   -- where
@@ -230,7 +244,10 @@ synthEff g (Tick _ e)
 --        else
 --          synthEff g e
 synthEff g e@(App _ (Type _))
-  = synthTyApps g e []
+  = do (et, p) <- synthTyApps g e []
+       reft <- lookupSortedReft e
+       liftIO $ putStrLn (printf "ty app reft is %s\n" (showpp reft))
+       return (et, p)
   where
     skip t
       | isDictTy t     = True
@@ -238,9 +255,10 @@ synthEff g e@(App _ (Type _))
                            Just (tc, tys) -> not (L.null tys)
                            _ -> True
       | otherwise      = False
+    lift e = return (e, Nothing)
     synthTyApps g e'@(Var f) ts
       = do meff <- builtinClassEffect f (L.reverse ts)
-           maybe (synthEff g e') freshFnEff meff
+           maybe (synthEff g e') ((lift =<<) . freshFnEff) meff
     synthTyApps g (App e (Type t)) ts
       = synthTyApps g e (t:ts)
     synthTyApps g (App e x) ts
@@ -248,9 +266,12 @@ synthEff g e@(App _ (Type _))
       = synthTyApps g e ts
     synthTyApps g (Tick _ e) ts
       = synthTyApps g e ts
-synthEff g (App e m)
+synthEff g eff@(App e m)
   | not (isTypeArg m) && skip (CoreUtils.exprType m)
-  = synthEff g e
+  = do (et, p) <- synthEff g e
+       reft <- lookupSortedReft eff
+       liftIO $ putStrLn (printf "skip app reft is %s\n" (showpp reft))
+       return (et, p)
   where
     skip t
       | isDictTy t     = True
@@ -259,7 +280,9 @@ synthEff g (App e m)
                            _ -> True
       | otherwise      = False
 synthEff g (Lit l)
-  = return $ noEff 
+  = do  emb  <- gets tyconEmb 
+        let reft = uRType $ literalFRefType l
+        return $ (noEff, Just reft)
 synthEff g (Let b e)
   = do g' <- synth1Effect g b
        synthEff g' e
@@ -267,48 +290,84 @@ synthEff g (Lam b e)
   | isTyVar b
   = synthEff g e
   | otherwise
-  = do arge  <- defaultEff ty
-       te    <- synthEff (M.insert (getName b) arge g) e
-       arge' <- applySubstM arge
-       return (EPi (symbol b) arge' (abstractArg (symbol b) (Just ty) (betaReduceTy te)))
+  = do arge   <- defaultEff ty
+       (te,_) <- synthEff (extend g b arge Nothing) e
+       arge'  <- applySubstM arge
+       return (EPi (symbol b) arge' (abstractArg (symbol b) (Just ty) (betaReduceTy te)), Nothing)
   where ty = varType b
-synthEff g (App eFun eArg)
-  = do funEff                    <- applySubstM =<<
-                                    synthEff g eFun
+synthEff g eff@(App eFun eArg)
+  = do (funEff,funTy)             <- applySubstBinding =<<
+                                     synthEff g eFun
+       liftIO $ putStrLn (printf "funReft: %s\n" (Fp.showpp funTy))
        when debugApp $ (traceTy "funEff" funEff >> return ())
-       argEff                     <- applySubstM =<<
+       (argEff, reft0)            <- applySubstBinding =<<
                                      synthEff g eArg
+       liftIO $ putStrLn (printf "argReft: %s\n" (Fp.showpp reft0))
+       reft2 <- lookupSortedReft eff
+       let reft    = fromMaybe reft2 reftapp
+           reftapp = applyRefts funTy eArg reft0
+       liftIO $ case maybeExtractVar eArg of
+                  Just x -> putStrLn (printf "trying %s ====> %s\n" (symbolString x) (Fp.showpp reftapp))
+                  Nothing -> return ()
        when debugApp $ (traceTy "argEff" argEff >> return ())
        v                          <- freshTermVar
        let x = maybe v id $ maybeExtractVar eArg
        e                          <- freshEffTyVar
        -- unifyTysM tIn argEff
        EPi s tIn tOut             <- applySubstM =<< unifyTysM funEff (EPi v argEff e)
-       reft                       <- lookupSortedReft eArg
+       -- reft                       <- lookupSortedReft eArg
        effOut                     <- applySubstM tOut
-       let effOutSub = maybeSubArg x reft $ applyArg x mty Nothing {- reft -} effOut
+       liftIO $ putStrLn (printf "app return reft is %s\n" (Fp.showpp reft))
+       let effOutSub = maybeSubArg x reft0 $ applyArg x mty Nothing {- reft -} effOut
        -- liftIO $ putStrLn (printf "apply %s\n\t%s\n\tx:%s\n\ts:%s\n\treft: %s "
        --                               (printEff (betaReduceTy effOut))
        --                               (printEff (betaReduceTy $ effOutSub))
        --                               (symbolString x) (symbolString s) (showpp reft))
-       return effOutSub
+       -- liftIO $ putStrLn (printf "envout %s\n" (Fp.showpp (assocs (snd <$> g))))
+       return (effOutSub, Just reft)
   where
     mty = Just ty
-    maybeSubArg :: Symbol -> SortedReft -> EffTy -> EffTy
-    maybeSubArg s t e
+    maybeSubArg :: Symbol -> Maybe SpecType -> EffTy -> EffTy
+    maybeSubArg s (Just t) e
       -- = maybe e (\v -> sub [(s, Info (v,ty,t))] e) $ maybeExtractVar eArg
-      = maybe e (\v -> prefixInfo (Info (v,ty,t)) $ sub [(s, Info (v,ty,t))] e) $ maybeExtractVar eArg
+      = maybe e (\v -> prefixInfo (Info  v ty t env) $ sub [(s, Info v ty t env)] e) $ maybeExtractVar eArg
+    maybeSubArg _ _ e
+      = e
+    env = snd <$> g 
     ty = CoreUtils.exprType eArg
 
 synthEff g (Case e x t alts)
   = do es <- mapM (altEffect g) alts
        reft <- lookupSortedReft e
        -- assume EffTerms...
-       betaReduceTy <$> joinEffects (symbol ex) (CoreUtils.exprType e) reft es
+       eff <- betaReduceTy <$> joinEffects g (symbol ex) (CoreUtils.exprType e) reft es
+       return (eff, Nothing)
   where
     app e = AppEff (AppEff e (EffVar kont)) (EffVar me)
     ex = maybe err id $ maybeExtractVar e
     err = error "Not a var (case)"
+
+applyRefts :: Maybe SpecType -> CoreSyn.Expr b -> Maybe SpecType -> Maybe SpecType
+applyRefts (Just ft) (Lit l) xt
+  | (_, _, _, f)        <- bkUniv ft,
+    (_, RFun x t t' _)  <- bkClass f
+  = Just $ subst1 t' (x, fromJust $ mkLit l)
+applyRefts (Just ft) (Var x') xt
+  | (_, _, _, f)        <- bkUniv ft,
+    (_, RFun x t t' _)  <- bkClass f
+  = Just $ subst1 t' (reintern x, expr (symbol x'))
+applyRefts ft (Tick tt e) xt
+  = applyRefts ft e xt
+applyRefts ft l xt
+  = Nothing
+
+meetTys :: Maybe SpecType -> Maybe SpecType -> Maybe SpecType     
+meetTys (Just t) (Just t')
+  = Just (t `strengthen` ofReft r)
+  where
+    r = rTypeReft t `meet` rTypeReft t'
+meetTys (Just t) t' = Just t
+meetTys _ t'        = t'
 
 prefixInfo :: Info -> EffTy -> EffTy
 prefixInfo i = go 
@@ -319,7 +378,7 @@ prefixInfo i = go
     go (EPi s t1 t2)  = EPi s t1 (go t2)
     go (EffTerm e)    = EffTerm (Pend e i)
 
-
+generalizeEff :: EffEnv SpecType -> EffTy -> EffTy
 generalizeEff g
   = gen freeEffTyVars EForAll . gen freeEffTermVars ETermAbs
   where
@@ -329,16 +388,16 @@ generalizeEff g
         go s t = c s t
         free = fvs L.\\ gvs
         fvs = f t
-        gvs = nub (concatMap f $ M.elems g)
+        gvs = nub (concatMap (f . fst) $ bindings g)
 
-altEffect :: EffEnv -> CoreAlt -> EffectM (DataCon, [Symbol], EffTy)
+altEffect :: EffEnv SpecType -> CoreAlt -> EffectM (DataCon, [Symbol], EffTy)
 altEffect g (DataAlt dc, bs, e)
-  = do t <- synthEff g e
+  = do (t, _) <- synthEff g e
        return (dc, symbol <$> bs, t)
 altEffect g (LitAlt _, _, e)
-  = return $ (undefined, [], noEff)
+  = return $ (error "LitAlt", [], noEff)
 altEffect g (DEFAULT, _, _)
-  = return $ (undefined, [], noEff)
+  = return $ (error "DEFAULT", [], noEff)
 
 maybeExtractVar (Var v)     = Just (symbol v)
 maybeExtractVar (Tick tt e) = maybeExtractVar e
@@ -349,6 +408,11 @@ applySubstM t
   = do tsu <- gets tsubst
        esu <- gets esubst
        return (sub esu (sub tsu t))
+
+applySubstBinding :: (EffTy, Maybe r) -> EffectM (EffTy, Maybe r)              
+applySubstBinding (e, p)
+  = do e' <- applySubstM e
+       return (e', p)
 
 unifyTysM :: EffTy -> EffTy -> EffectM EffTy
 unifyTysM t1 t2
@@ -555,41 +619,41 @@ collectArgs = go []
 --         mu  = [(t, Mu t bdy)]
 --     in (su', AppEff (Mu t bdy) (EffVar (Src x ty)))
 
-fst3 (x,_,_) = x
-snd3 (_,y,_) = y
-thd3 (_,_,z) = z           
 -- This isn't right!!!!
-joinEffects _ _ _ []
+joinEffects _ _ _ _ []
   = return noEff
-joinEffects _ _ _ es@((_,_,EffNone):_)
+joinEffects _ _ _ _ es@((_,_,EffNone):_)
   = if length es /= length ets
              then foldM unifyTysM EffNone ets
                -- error (printf "Some are not none! %s" (concat (printEff <$> es)))
              else return EffNone
   where
     ets = [ e | e@EffNone <- thd3 <$> es ]
-joinEffects c ty t es@((_,_,EffTerm _):_)
+joinEffects env c ty t es@((_,_,EffTerm _):_)
   = return . EffTerm . callCC
                      . withPid
                      $ if length ets /= length es
                        then error "Bad!"
                        else NonDet ets
     where
+      g   = snd <$> env
       ets = [ go e | e@(_,_,EffTerm _) <- es ]
       app e = AppEff (AppEff e (EffVar kont)) (EffVar me)
-      go (x,y,EffTerm z) = Assume (Info (c,ty,t)) (x,y) (betaReduce (app z))
-joinEffects c ty t (e:es)
+      go (x,y,EffTerm z) = Assume (Info c ty t g) (x,y) (betaReduce (app z))
+joinEffects env c ty t (e:es)
   = do foldM_ (\et e -> unifyTysM et (thd3 e)) (thd3 e) es
-       joinEffects c ty t =<< mapM (\(x,y,z) -> applySubstM z >>= \t -> return (x,y,t)) (e:es) 
+       joinEffects env c ty t =<< mapM (\(x,y,z) -> applySubstM z >>= \t -> return (x,y,t)) (e:es) 
 
-printTy :: String -> SortedReft -> EffectM ()
+printTy :: String -> SpecType -> EffectM ()
 printTy msg p
   = liftIO $ print (msg ++ " " ++ showpp p)
 
-lookupSortedReft :: CoreExpr -> EffectM SortedReft
+lookupSortedReft :: CoreExpr -> EffectM SpecType
 lookupSortedReft e@(Var x)
-  = do t_spec <- substa reintern <$> lookupType (getSrcSpan x) e
-       checkSpec e t_spec
+  = do t_spec  <- substa reintern <$> lookupType (getSrcSpan x) e
+       t_spec' <- checkSpec e t_spec
+       t_assm  <- lookupAssm x
+       return $ fromMaybe t_spec' t_assm
 lookupSortedReft (Tick tt e@(Var x))
   = checkSpec e =<< substa reintern <$> lookupType (getSrcSpan x) e 
 lookupSortedReft (Tick tt e)
@@ -598,25 +662,31 @@ lookupSortedReft e
   = defaultSortedReft e
 reintern s = symbol (symbolString s)
 
-checkSpec e tspec@(RR so _) = do
-   t_def@(RR so' _)  <- defaultSortedReft e
+lookupAssm :: Var -> EffectM (Maybe SpecType)
+lookupAssm x = L.lookup x <$> gets assms
+
+checkSpec e tspec = do
+   emb    <- gets tyconEmb
+   t_def  <- defaultSortedReft e
+   let (RR so _) = rTypeSortedReft emb tspec
+   let (RR so' _) = rTypeSortedReft emb t_def
    return $ if so == so' then tspec
                          else t_def
 
-defaultSortedReft :: CoreExpr -> EffectM SortedReft
+defaultSortedReft :: CoreExpr -> EffectM SpecType
 defaultSortedReft e
   = do emb <- gets tyconEmb
        let t = ofType (CoreUtils.exprType e) :: SpecType
-       return (rTypeSortedReft emb t)
+       return t
     
-lookupType :: SrcSpan -> CoreExpr -> EffectM SortedReft
+lookupType :: SrcSpan -> CoreExpr -> EffectM SpecType
 lookupType s e = do
   ann <- gets annots
   emb <- gets tyconEmb
   case H.lookup s ann of
     Nothing  ->
       let t = ofType (CoreUtils.exprType e) :: SpecType in
-      return (rTypeSortedReft emb t)
+      return t
     Just [t] -> do
       return t
 

@@ -2,6 +2,7 @@ module Control.Process.MessagePassing.EffEnv where
 
 import Name
 import Var
+import Type
 import Annotations
 import Serialized
 import qualified Data.Map.Strict as M
@@ -14,30 +15,42 @@ import           Control.Process.MessagePassing.Builtins
 import           Control.Process.MessagePassing.Parse
 
  
-type EffEnv = M.Map Name EffTy
+type EffEnv r = M.Map Var (EffTy, Maybe r)
 
-lookupString :: EffEnv -> String -> Maybe EffTy
+lookupString :: EffEnv r -> String -> Maybe EffTy
 lookupString g s
   = case [ v | (k,v) <- M.toList g, eq k ] of
-      v:_ -> Just v
+      (e,_):_ -> Just e
       _   -> Nothing
     where
       eq x = getOccString x == s
+      -- eq x = symbolString x == s
 
-lookupEffTy :: EffEnv -> Var -> EffectM (Maybe EffTy)
+lookupEffTy :: EffEnv r -> Var -> EffectM (Maybe EffTy)
 lookupEffTy g x
+  = (fst <$>) <$> lookupEffTyEnv g x
+
+lookupReft :: EffEnv r -> Var -> EffectM (Maybe r)
+lookupReft g x
+  = join . (snd <$>) <$> lookupEffTyEnv g x
+
+extend :: EffEnv r -> Var -> EffTy -> Maybe r -> EffEnv r
+extend g x t p = M.insert x (t,p) g
+
+bindings = M.elems
+
+lookupEffTyEnv :: EffEnv r -> Var -> EffectM (Maybe (EffTy, Maybe r))
+lookupEffTyEnv g x
   | isRecordSel x
-  = return $ Just recSelEff
-  | getName x `M.member` g
-  = return $ M.lookup (getName x) g
+  = return $ Just (recSelEff, Nothing)
+  | x `M.member` g
+  = return $ M.lookup x g
   | otherwise
   = do as  <- lookupAnn x
        consult as
-       {- freshFnEff eff -} {- >>= dbgTy "synthEff: Var" -}
-       -- liftIO $ putStrLn (show as)
   where
     consult [t] = case parseEffTy t of
-                    Right et -> return $ Just et
+                    Right et -> return $ Just (et, Nothing)
                     _        -> return Nothing
     consult _   = return Nothing
 

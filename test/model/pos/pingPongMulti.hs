@@ -30,9 +30,7 @@ spawnLoop i
          let ret = PList x xs
          return ret
   | otherwise
-    = return emp
-  where
-    emp = Emp
+    = return Emp
 
 pongProc :: Process ()
 pongProc
@@ -63,7 +61,7 @@ waitLoop (PList p ps)
                       return ()
 
 main :: Process ()
-main = do ps <- spawnLoop 3 
+main = do ps <- spawnLoop 4 
           pingLoop ps
           waitLoop ps
           return ()
