@@ -279,7 +279,11 @@ promelaEffect e = do recCall <- maybeRecursiveCall e
     go _ (Bind m g)
       = error (printf "What %s\n" (render (pretty g)))
     go _ (NonDet es)
-      = promelaNonDet es
+      = do e <- promelaInfo i
+           k <- promelaNonDet es
+           return (e $+$ k)
+      where
+        i = head [ i | (Assume i _ _) <- es ]
     go _ (Assume i unfolds e)
       = promelaAssume i unfolds e
     go _ (AppEff (EffVar (Src f _)) _)
@@ -383,10 +387,11 @@ promelaNonDet es
 promelaAssume i@(Info x ty reft g) (c,ys) e
   | PrimType {tyname = t} <- tyInfo ty,
     (Just d) <- maybeCompare i
-  = do e' <- promelaEffect e
+  = do env <- promelaInfo i
+       e' <- promelaEffect e
        let x = if getUnique c == trueDataConKey
                then d else text "!" <> parens d
-       return $ x <+> text "->" <+> braces e'
+       return $ env $+$ x <+> text "->" <+> braces e'
 promelaAssume (Info x ty reft g) (c,ys) e
   = do modify $ \s -> s { vars = validVars ys ++ vars s }
        d <- promelaEffect e
@@ -827,10 +832,14 @@ maybeInt (Info x ty reft g)
     go _ = Nothing
 maybeCstrApp :: Info -> Maybe (CstrInfo, [Fp.Expr])
 maybeCstrApp (Info x ty reft g)
-  = case extractPreds go (R.rTypeReft reft) of
+  = case extractPreds go (Fp.tracepp "maybeCstrApp" $ R.rTypeReft reft) of
       c:_ -> Just c
       _   -> Nothing
   where
+    go (Fp.EVar f) =
+      case cstrFor f ty of
+        Just cinfo -> Just (cinfo, [])
+        _          -> Nothing
     go (Fp.splitEApp -> (Fp.EVar f, as)) =
       case cstrFor f ty of
         Just cinfo -> Just (cinfo, as)
@@ -930,7 +939,7 @@ type Arg    = Type
 
 cstrFor :: Fp.Symbol -> Type -> Maybe CstrInfo
 cstrFor f (tyInfo -> tinfo@TypeInfo{})
-  = case [ ci | ci <- cinfo tinfo, (cname ci) == f ] of
+  = case [ ci | ci <- cinfo tinfo, symbolString (cname ci) == symbolString f ] of
       [ci] -> Just ci
       []   -> Nothing
 cstrFor _ _
