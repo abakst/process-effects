@@ -1,0 +1,1 @@
+../test/model/pos/workStealing.hs
