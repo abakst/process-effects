@@ -25,14 +25,10 @@ spawnLoop :: Pid -> Int -> Process PidList
 spawnLoop p i
   | gtZero i
     = do x       <- spawn (workerProc p)
-         let i'  = myPred i
-         xs      <- spawnLoop p i'
-         let ret = PList x xs
-         return ret
+         xs      <- spawnLoop p (i - 1)
+         return (PList x xs)
   | otherwise
-    = return emp
-  where
-    emp = Emp
+    = return Emp
 
 workerProc :: Pid -> Process ()
 workerProc master
@@ -50,18 +46,14 @@ workerProc master
 workLoop :: PidList -> Process ()
 workLoop Emp            = return ()
 workLoop (PList p rest) = do
-  let msg = Task z -- stub
-      z   = 0 :: Int
-  send p msg
+  send p (Task 0)
   workLoop rest
 
 doneLoop :: PidList -> Process ()
 doneLoop Emp
   = return ()
-doneLoop (PList _ rest)
-  = do pid     <- recv
-       let msg = DONE
-       send pid msg
+doneLoop (PList p rest)
+  = do send p DONE
        doneLoop rest
        return ()
 

@@ -327,6 +327,8 @@ formalsList = parens . hcat . punctuate semi . fmap go
 
 validVars = nub . filter (\v -> symbolString v /= "_")
 
+
+            
 promelaInfo :: Info -> PM Doc
 promelaInfo i@(Info x ty φ γ) -- yes unicode. sue me.
   = do env <- gets vars
@@ -340,9 +342,8 @@ promelaInfo i@(Info x ty φ γ) -- yes unicode. sue me.
        modify $ \s -> s { vars = maybe env0 (const (validVars $ (z : env0))) d }
        case catMaybes ds of
          [] -> return empty
-         xs -> return $ text "/* from promelaInfo */" $+$ foldl1 seqst xs
+         xs -> return $ text "/* from promelaInfo */" $+$ foldl1 ($+$) xs
   where
-    seqst d1 d2 = d1 $+$ d2
     go (x,t) (docs, xs)
       | x `notElem` xs, Just (z,Just d) <- bindVal xs (x,t)
       = (Just d:docs, x:xs)
