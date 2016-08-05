@@ -25,52 +25,33 @@ main = do me <- getSelfPid
     n = 3 :: Int
 
 resServer :: Process ()
-resServer = resLoop unlk
+resServer = resLoop Unlocked
   where
-    unlk = Unlocked
-    lk   = Locked
     resLoop Unlocked
       = do lock <- recv
            case lock of
              Lock p ->
-               do send p acq
-                  resLoop lkd
-                     where
-                       acq = Acquired
-                       lkd = Locked
+               do send p Acquired
+                  resLoop Locked
     resLoop Locked
       = do request <- recv
            case request of
-             ReqInc -> resLoop lk
-             ReqGet -> resLoop lk
-             Unlock  -> resLoop unlk
+             ReqInc -> resLoop Locked
+             ReqGet -> resLoop Locked
+             Unlock  -> resLoop Unlocked
 
 client :: Pid -> Process ()
 client r = do me <- getSelfPid
-              let lock_msg = Lock me
-              send r lock_msg
+              send r (Lock me)
               msg <- recv
               case msg of
                 Acquired ->
-                  do send r inc
-                     send r unlock
-  where
-    lock me = Lock me
-    unlock  = Unlock
-    inc     = ReqInc
+                  do send r ReqInc
+                     send r Unlock
 
 
 spawnN :: Int -> Pid -> Process ()
 spawnN n p
-  | gtZero n  = do spawn (client p)
-                   let n' = myPred n
-                   spawnN n' p
+  | n > 0  = do spawn (client p)
+                spawnN (n - 1) p
   | otherwise = return ()
-
-{-@ myPred :: x:Int -> {v:Int | v = x - 1} @-}
-myPred :: Int -> Int
-myPred x = x - 1
-
-{-@ gtZero :: x:Int -> {v:Bool | Prop v <=> x > 0} @-}
-gtZero :: Int -> Bool
-gtZero x = x > 0

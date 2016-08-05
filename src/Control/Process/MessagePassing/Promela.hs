@@ -804,8 +804,8 @@ extractPropPreds f e
   = catMaybes (f <$> propPreds e)
 
 maybeExpr :: Info -> Maybe Doc
-maybeExpr (Info x ty (R.rTypeReft -> reft) g)
-  = case extractPreds go reft of
+maybeExpr (Info x ty reft g)
+  = case extractPreds go (R.rTypeReft reft) of
       c:_ -> Just c
       _    -> Nothing
   where
@@ -832,7 +832,7 @@ maybeInt (Info x ty reft g)
     go _ = Nothing
 maybeCstrApp :: Info -> Maybe (CstrInfo, [Fp.Expr])
 maybeCstrApp (Info x ty reft g)
-  = case extractPreds go (Fp.tracepp "maybeCstrApp" $ R.rTypeReft reft) of
+  = case extractPreds go (R.rTypeReft reft) of
       c:_ -> Just c
       _   -> Nothing
   where

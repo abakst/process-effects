@@ -9,7 +9,7 @@ set -e
 
 bench_file=1
 pan_flags=""
-simulate=1
+simulate=""
 
 while getopts "sp:" opt; do
     case "$opt" in
@@ -45,10 +45,12 @@ if [ -f "out.pml.trail" ]; then
     rm "out.pml.trail"
 fi
 
-if [ $simulate ]; then
-  ${SPIN} ${pan_flags} "$(dirname $bench_file)/.liquid/out.pml"
-else
+if [ -z $simulate ]; then
+  echo "Doing verification"
   ${PAN} ${pan_flags} "$(dirname $bench_file)/.liquid/out.pml"
+else
+  echo "Doing simulation"
+  ${SPIN} ${pan_flags} "$(dirname $bench_file)/.liquid/out.pml"
 fi
 
 if [ -f "out.pml.trail" ]; then

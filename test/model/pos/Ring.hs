@@ -11,34 +11,31 @@ import Data.Either
 
 main :: Process ()
 main = do me <- getSelfPid
-          hd <- spawnRing n me
-          send hd x
-          ringProc x hd
-  where
-    x = 0 :: Int
-    n = 2 :: Int
+          hd <- spawnRing 3 me
+          send hd (0 :: Int)
+          ringProc 0 hd
 
 ringProc :: Int -> Pid -> Process ()
 ringProc t nxt
   = do msg <- recv :: Process Int
-       if msg `gt` t then
+       if msg > t then
          do send nxt msg
             ringProc msg nxt
-       else if msg `lt` t then
-              ringProc t nxt
-            else do
-              send nxt msg
-              return ()
+       else
+         if msg < t then
+           ringProc t nxt
+         else do
+           send nxt msg
+           return ()
 
 spawnRing :: Int -> Pid -> Process Pid
 spawnRing i prev
   = loop i prev
   where
   loop i x
-    | gtZero i
+    | i > 0
     = do x' <- spawn (send x i >> ringProc i x)
-         let i'  = myPred i
-         loop i' x'
+         loop (i - 1) x'
     | otherwise
     = return x
 

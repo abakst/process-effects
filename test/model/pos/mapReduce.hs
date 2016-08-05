@@ -12,33 +12,20 @@ instance RecvMsg Message where
 {-@ invariant {v:Int | validMsg v} @-}
 {-@ invariant {v:Message | validMsg v} @-}
 
-{-@ myPred :: x:Int -> {v:Int | v = x - 1} @-}
-myPred :: Int -> Int
-myPred x = x - 1
-
-{-@ gtZero :: x:Int -> {v:Bool | Prop v <=> x > 0} @-}
-gtZero :: Int -> Bool
-gtZero x = x > 0
-
 {-@ spawnLoop :: Pid -> Int -> Process PidList @-}
 spawnLoop :: Pid -> Int -> Process PidList
 spawnLoop p i
-  | gtZero i
+  | i > 0
     = do x       <- spawn (workerProc p)
-         let i'  = myPred i
-         xs      <- spawnLoop p i'
-         let ret = PList x xs
-         return ret
+         xs      <- spawnLoop p (i - 1)
+         return (PList x xs)
   | otherwise
-    = return emp
-  where
-    emp = Emp
+    = return Emp
 
 workerProc :: Pid -> Process ()
 workerProc master
   = do self <- getSelfPid
-       foo  <- go self
-       return ()
+       go self
   where
     go :: Pid -> Process ()
     go self
@@ -51,45 +38,47 @@ workerProc master
              DONE   -> return ()
            return ()
 
-
 workLoop :: Pid -> Int -> Process ()
 workLoop p n
-  | gtZero n = do pid     <- recv
-                  let msg = Task n p
-                      n'  = myPred n
-                  send pid msg
-                  workLoop p n'
+  | n > 0    = do pid     <- recv
+                  send pid (Task n p)
+                  workLoop p (n - 1)
                   return ()
   | otherwise = return ()
 
 doneLoop :: Int -> Process ()
 doneLoop n
-  | gtZero n = do pid     <- recv
+  | n > 0    = do pid     <- recv
                   let msg = DONE
-                      n'  = myPred n
                   send pid msg
-                  doneLoop n'
+                  doneLoop (n - 1)
                   return ()
   | otherwise = return ()
 
 masterLoop :: Int -> Process ()              
 masterLoop i
-  | gtZero i = do x <- recv :: Process Int
-                  let i' = myPred i
-                  masterLoop i'
+  | i > 0    = do _ <- recv :: Process Int -- Could do something with this...
+                  masterLoop (i - 1)
                   return ()
   | otherwise = return ()
 
 main :: Process ()
 main = do me <- getSelfPid
+          -- Spawn a work queue that waits for
+          -- `numWork + numClients` requests
           queue <- spawn $ do n <- recv
                               workLoop me numWork
                               doneLoop n
                               return ()
           ps <- spawnLoop queue numClients
+
+          -- Tell the queue about the clients
           send queue numClients
+
+          -- Wait for responses
           masterLoop numWork
+
           return ()
   where
     numWork = 2
-    numClients = 3
+    numClients = 2
