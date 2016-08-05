@@ -355,7 +355,7 @@ applyRefts (Just ft) (Lit l) xt
 applyRefts (Just ft) (Var x') xt
   | (_, _, _, f)        <- bkUniv ft,
     (_, RFun x t t' _)  <- bkClass f
-  = Just $ subst1 t' (reintern x, expr (symbol x'))
+  = Just $ subst1 (substa reintern t') (reintern x, expr (symbol x'))
 applyRefts ft (Tick tt e) xt
   = applyRefts ft e xt
 applyRefts ft l xt

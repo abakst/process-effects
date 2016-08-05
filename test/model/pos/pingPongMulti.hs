@@ -12,23 +12,12 @@ instance RecvMsg Message where
 {-@ invariant {v:Int | validMsg v} @-}
 {-@ invariant {v:Message | validMsg v} @-}
 
-{-@ myPred :: x:Int -> {v:Int | v = x - 1} @-}
-myPred :: Int -> Int
-myPred x = x - 1
-
-{-@ gtZero :: x:Int -> {v:Bool | Prop v <=> x > 0} @-}
-gtZero :: Int -> Bool
-gtZero x = x > 0            
-
-{-@ spawnLoop :: Int -> Process PidList @-}
 spawnLoop :: Int -> Process PidList
 spawnLoop i 
-  | gtZero i
-    = do x  <- spawn $ pongProc
-         let i' = myPred i
-         xs <- spawnLoop i'
-         let ret = PList x xs
-         return ret
+  | i > 0
+    = do x  <- spawn pongProc
+         xs <- spawnLoop (i - 1)
+         return (PList x xs)
   | otherwise
     = return Emp
 
@@ -37,17 +26,15 @@ pongProc
   = do self <- getSelfPid
        msg  <- recv          
        case msg of
-         Ping p -> do send p resp
+         Ping p -> do send p (Pong self)
                       return ()
-                        where resp = Pong self
 
 pingLoop :: PidList -> Process ()
 pingLoop Emp
   = return ()
 pingLoop (PList p ps)
   = do self <- getSelfPid
-       let msg = Ping self
-       send p msg
+       send p (Ping self)
        pingLoop ps
        return ()
 
@@ -61,7 +48,7 @@ waitLoop (PList p ps)
                       return ()
 
 main :: Process ()
-main = do ps <- spawnLoop 4 
+main = do ps <- spawnLoop 3
           pingLoop ps
           waitLoop ps
           return ()
