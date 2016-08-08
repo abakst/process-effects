@@ -37,8 +37,8 @@ maybeAnnot :: Info -> Doc -> Doc
 maybeAnnot i@(Info x _ (Rt.rTypeReft -> Fp.Reft (vv,p)) g) d
   = if not $ Fp.isTautoPred p then
       braces (d <+> text "where" <+>
-              Fp.pprint (Fp.subst1 p (vv, Fp.expr (symbol x))) <+>
-              vcat (punctuate comma (((\(x,t) -> pretty (symbol x) <> text ":" <> Fp.pprint t) <$> M.toList g))))
+              Fp.pprint (Fp.subst1 p (vv, Fp.expr (symbol x)))
+              {- vcat (punctuate comma (((\(x,t) -> pretty (symbol x) <> text ":" <> Fp.pprint t) <$> M.toList g)))) -})
      else
        d
 
