@@ -180,7 +180,7 @@ abstractArg x t = go
     go (ETyApp e1 e2)    = ETyApp (go e1) (go e2)
     go (EPi s' t1' t2')  = EPi s' (go t1') (go t2')
     go (EffTerm e)       = EffTerm (AbsEff (Src x t) e)
-    go e                 = EForAll x e
+    go e                 = {- EForAll x -} e
 
 -- SO BAD, PLEASE REFACTOR ME!!!
 freeEffTyVars :: EffTy -> [Symbol]                       

@@ -48,7 +48,7 @@ waitLoop (PList p ps)
                       return ()
 
 main :: Process ()
-main = do ps <- spawnLoop 3
+main = do ps <- spawnLoop 2
           pingLoop ps
           waitLoop ps
           return ()

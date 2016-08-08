@@ -46,8 +46,8 @@ import Language.Haskell.Liquid.GHC.Misc
 import Language.Fixpoint.Types hiding (PPrint(..), SrcSpan(..), ECon) 
 import qualified Language.Fixpoint.Types as Fp
 
-debugUnify = True
-debugApp   = True
+debugUnify = False
+debugApp   = False
 
 debug s x = trace (s ++ ": " ++ show x) x  
 
@@ -224,7 +224,7 @@ synthEff g e@(Var x)
            reft = fromMaybe err . getFirst $ envreft <> reft0
        liftIO $ putStrLn (printf "%s ::: %s %s\n" (Fp.showpp (symbol x)) (Fp.showpp (getFirst r)) (Fp.showpp reft))
        eff <- freshFnEff eff
-       return (eff, Just reft)
+       return (eff, Just ((compactReft <$>) <$> reft))
   where
     err = error $ printf "Can't find an eff for %s" (symbolString (symbol x))
 synthEff g eff@(Tick _ e)
@@ -298,7 +298,7 @@ synthEff g (Lam b e)
 synthEff g eff@(App eFun eArg)
   = do (funEff,funTy)             <- applySubstBinding =<<
                                      synthEff g eFun
-       liftIO $ putStrLn (printf "funReft: %s\n" (Fp.showpp funTy))
+       -- liftIO $ putStrLn (printf "funReft: %s\n" (Fp.showpp funTy))
        when debugApp $ (traceTy "funEff" funEff >> return ())
        (argEff, reft0)            <- applySubstBinding =<<
                                      synthEff g eArg
@@ -306,9 +306,9 @@ synthEff g eff@(App eFun eArg)
        reft2 <- lookupSortedReft eff
        let reft    = fromMaybe reft2 reftapp
            reftapp = applyRefts funTy eArg reft0
-       liftIO $ case maybeExtractVar eArg of
-                  Just x -> putStrLn (printf "trying %s ====> %s\n" (symbolString x) (Fp.showpp reftapp))
-                  Nothing -> return ()
+       -- liftIO $ case maybeExtractVar eArg of
+       --            Just x -> putStrLn (printf "trying %s ====> %s\n" (symbolString x) (Fp.showpp reftapp))
+       --            Nothing -> return ()
        when debugApp $ (traceTy "argEff" argEff >> return ())
        v                          <- freshTermVar
        let x = maybe v id $ maybeExtractVar eArg
@@ -317,12 +317,12 @@ synthEff g eff@(App eFun eArg)
        EPi s tIn tOut             <- applySubstM =<< unifyTysM funEff (EPi v argEff e)
        -- reft                       <- lookupSortedReft eArg
        effOut                     <- applySubstM tOut
-       liftIO $ putStrLn (printf "app return reft is %s\n" (Fp.showpp reft))
+       -- liftIO $ putStrLn (printf "app return reft is %s\n" (Fp.showpp reft))
        let effOutSub = maybeSubArg x reft0 $ applyArg x mty Nothing {- reft -} effOut
-       liftIO $ putStrLn (printf "apply %s\n\t%s\n\tx:%s\n\ts:%s\n\treft: %s "
-                                     (printEff (betaReduceTy effOut))
-                                     (printEff (betaReduceTy $ effOutSub))
-                                     (symbolString x) (symbolString s) (showpp reft))
+       -- liftIO $ putStrLn (printf "apply %s\n\t%s\n\tx:%s\n\ts:%s\n\treft: %s "
+       --                               (printEff (betaReduceTy effOut))
+       --                               (printEff (betaReduceTy $ effOutSub))
+       --                               (symbolString x) (symbolString s) (showpp reft))
        -- liftIO $ putStrLn (printf "envout %s\n" (Fp.showpp (assocs (snd <$> g))))
        return (effOutSub, Just reft)
   where
@@ -365,9 +365,12 @@ meetTys :: Maybe SpecType -> Maybe SpecType -> Maybe SpecType
 meetTys (Just t) (Just t')
   = Just (t `strengthen` ofReft r)
   where
-    r = rTypeReft t `meet` rTypeReft t'
+    r = compactReft (rTypeReft t `meet` rTypeReft t')
 meetTys (Just t) t' = Just t
 meetTys _ t'        = t'
+
+compactReft (Reft (vv,p))                      
+  = Reft (vv, PAnd (L.nub . conjuncts . substa reintern $ p))
 
 prefixInfo :: Info -> EffTy -> EffTy
 prefixInfo i = go 
@@ -425,7 +428,10 @@ unifyTysM t1 t2
     ap tsu esu = sub esu . sub tsu
 
 unifyTys tsu esu t1 t2                 
-  = do u@(_,_,t) <- unifyTermTys tsu esu t1 t2
+  = unifyTys' [] tsu esu t1 t2
+    
+unifyTys' xs tsu esu t1 t2                 
+  = do u@(_,_,t) <- unifyTermTys xs tsu esu t1 t2
        when debugUnify . liftIO $ do (putStrLn dbg)
                                      (putStrLn (printf "===> %s\n" (printEff t)))
        return u
@@ -434,43 +440,47 @@ unifyTys tsu esu t1 t2
             (printEff t1) (printEff t2)
             (printSubst printEff tsu) (printSubst printEffTerm esu)
 
-unifyTermTys tSub eSub EffNone EffNone
+unifyTermTys xs tSub eSub EffNone EffNone
   = return (tSub, eSub, EffNone)
-unifyTermTys tSub eSub (ETyVar t) t'
+unifyTermTys xs tSub eSub (ETyVar t) t'
   | t `notElem` dom tSub
-  = return (tSub', eSub, t')
+  = return (tSub', eSub, abstractAll xs t')
   where
-    tSub' = tSub `catSubst` [(t, t')]
-unifyTermTys tSub eSub t' (ETyVar t)
+    tSub' = tSub `catSubst` [(t, abstractAll xs t')]
+unifyTermTys xs tSub eSub t' (ETyVar t)
   | t `notElem` dom tSub
-  = return (tSub', eSub, t')
+  = return (tSub', eSub, abstractAll xs t')
   where
-    tSub' = tSub `catSubst` [(t, t')]
-unifyTermTys tSub eSub (EffTerm t1) (EffTerm t2)
+    tSub' = tSub `catSubst` [(t, abstractAll xs t')]
+unifyTermTys xs tSub eSub (EffTerm t1) (EffTerm t2)
   = do let (eSub', t) = unifyTerms eSub t1 t2
-       return (tSub, eSub', EffTerm t)
-unifyTermTys tSub eSub f@(EPi s t1 t2) (EPi s' t1' t2')
+       return (tSub, eSub', abstractAll xs $ EffTerm t)
+unifyTermTys xs tSub eSub f@(EPi s t1 t2) (EPi s' t1' t2')
   = do v                     <- freshTermVar
-       (tSub1, eSub1, tyIn)  <- unifyTys tSub eSub (sub [(s,v)] t1) (sub [(s',v)] t1')
+       (tSub1, eSub1, tyIn)  <- unifyTys' xs tSub eSub (sub [(s,v)] t1) (sub [(s',v)] t1')
        let ap = sub eSub1 . sub tSub1 
-       (tSub2, eSub2, tyOut) <- unifyTys tSub1 eSub1 (ap $ sub [(s,v)] (applyArg v Nothing Nothing t2))
+       (tSub2, eSub2, tyOut) <- unifyTys' (v:xs) tSub1 eSub1 (ap $ sub [(s,v)] (applyArg v Nothing Nothing t2))
                                                      (ap $ sub [(s',v)] (applyArg v Nothing Nothing t2'))
-       return (sub eSub2 (sub eSub1 tSub2), eSub2, EPi v tyIn (abstractArg v Nothing tyOut))
-unifyTermTys tSub eSub (ETermAbs s t) (ETermAbs s' t')
+       return (sub eSub2 (sub eSub1 tSub2), eSub2, EPi v tyIn ({- abstractArg v Nothing -} tyOut))
+unifyTermTys xs tSub eSub (ETermAbs s t) (ETermAbs s' t')
   = do e         <- freshEffVar
        let inst  = [(s, EffVar (Eff e)), (s', EffVar (Eff e))]
-       (tSub, eSub, t'') <- unifyTys tSub eSub (sub inst t) (sub inst t')
+       (tSub, eSub, t'') <- unifyTys' xs tSub eSub (sub inst t) (sub inst t')
        return (tSub, eSub, ETermAbs e t'')
-unifyTermTys tSub eSub t@(ETermAbs _ _) t'
+unifyTermTys xs tSub eSub t@(ETermAbs _ _) t'
   = do e <- freshEffVar
-       unifyTys tSub eSub t (ETermAbs e t')
-unifyTermTys tSub eSub t t'@(ETermAbs _ _)
+       unifyTys' xs tSub eSub t (ETermAbs e t')
+unifyTermTys xs tSub eSub t t'@(ETermAbs _ _)
   = do e <- freshEffVar
-       unifyTys tSub eSub (ETermAbs e t) t'
-unifyTermTys tsub esub t1 t2
+       unifyTys' xs tSub eSub (ETermAbs e t) t'
+unifyTermTys xs tsub esub t1 t2
   = error oops  -- (printEff t1) (printEff t2))
   where
     oops = printf "%s unify %s\nsubt:(%s)\nsube:(%s)" (printEff t1) (printEff t2) (printSubst printEff tsub) (printSubst printEffTerm esub)
+
+abstractAll xs t = L.foldl go t xs
+  where
+    go t x = abstractArg x Nothing t
 
 unifyTerms su e1 e2
   = (su', t')
