@@ -328,7 +328,7 @@ formalsList = parens . hcat . punctuate semi . fmap go
 validVars = nub . filter (\v -> symbolString v /= "_")
 
 
-            
+
 promelaInfo :: Info -> PM Doc
 promelaInfo i@(Info x ty φ γ) -- yes unicode. sue me.
   = do env <- gets vars
@@ -336,13 +336,14 @@ promelaInfo i@(Info x ty φ γ) -- yes unicode. sue me.
                                             | (x', Just t) <- bs
                                             , x /= Fp.symbol x'
                                             ]
-           bs         = M.toList γ
+           bs      = M.toList γ
            (z,_,d) = promelaVal env0 (Pend (EffVar (Src x (Just ty))) i)
            ds      = ds0 ++ if x `notElem` env then [d] else []
+           envdoc  = pretty i
        modify $ \s -> s { vars = maybe env0 (const (validVars $ (z : env0))) d }
        case catMaybes ds of
          [] -> return empty
-         xs -> return $ text "/* from promelaInfo */" $+$ foldl1 ($+$) xs
+         xs -> return $ text "/*" $+$ envdoc $+$ text "*/" $+$ foldl1 ($+$) xs
   where
     go (x,t) (docs, xs)
       | x `notElem` xs, Just (z,Just d) <- bindVal xs (x,t)
@@ -351,7 +352,7 @@ promelaInfo i@(Info x ty φ γ) -- yes unicode. sue me.
       = (docs, xs)
     bindVal xs (x,t)
       | Just ty <- extractTy t
-      = let (z,_,d) = promelaVal xs (pendBind ty (x,t))
+      = let (z,_,d) = promelaVal xs (pendBind ty (Fp.tracepp "x ==>" x,t))
         in Just (z,d)
       | otherwise
       = Nothing
@@ -776,17 +777,21 @@ maybeInfoVal env x (maybeCstrApp -> Just (cinfo, args))
     cstr = text ".c" <> int (ctag cinfo)
     tyname = ctype cinfo
 maybeInfoVal env x (maybeInt -> Just i)
-  | x `notElem` env
-  = Just $ (text "int" <+> promela x <+> equals <+> int i <> semi)
-  | otherwise
-  = Just $ (promela x <+> equals <+> int i <> semi)
+  = Just $ maybeDeclDoc env x (int i) <> semi
 maybeInfoVal env x (maybeExpr -> Just e)
-  | x `notElem` env
-  = Just $ text "int" <+> promela x <+> equals <+> e <> semi
-  | otherwise
-  = Just $ promela x <+> equals <+> e <> semi
+  = Just $ maybeDeclDoc env x e <> semi
 maybeInfoVal env x _
   = Nothing
+
+maybeDeclDoc :: [Fp.Symbol] -> Fp.Symbol -> Doc -> Doc
+maybeDeclDoc env x def
+  | x `elem` env
+  = assgn
+  | otherwise
+  = ptrType <+> assgn
+  where
+    assgn = promela x <+> equals <+> def
+
 
 eqpreds :: Fp.Reft -> [Fp.Expr]
 eqpreds (Fp.Reft (vv,e))

@@ -7,6 +7,7 @@ import           Control.Process.MessagePassing.EffectTypes
 import           Text.PrettyPrint.HughesPJ hiding ((<$>))
 import qualified Language.Fixpoint.Types as Fp
 import qualified Language.Haskell.Liquid.Types as Rt
+import qualified Data.Map as M
 
 class Pretty a where
   pprintPrec :: Int -> a -> Doc
@@ -36,13 +37,17 @@ maybeAnnot :: Info -> Doc -> Doc
 maybeAnnot i@(Info x _ (Rt.rTypeReft -> Fp.Reft (vv,p)) g) d
   = if not $ Fp.isTautoPred p then
       braces (d <+> text "where" <+>
-              Fp.pprint (Fp.subst1 p (vv, Fp.expr (symbol x))))
+              Fp.pprint (Fp.subst1 p (vv, Fp.expr (symbol x))) <+>
+              vcat (punctuate comma (((\(x,t) -> pretty (symbol x) <> text ":" <> Fp.pprint t) <$> M.toList g))))
      else
        d
 
 instance Pretty Info where
-  pprintPrec _ (Info x _ reft _)
-    = Fp.pprint (x, reft)
+  -- pprintPrec _ (Info x _ reft _)
+  --   = Fp.pprint (x, reft)
+  pprintPrec _ (Info x _ (Rt.rTypeReft -> Fp.Reft (vv,p)) g)
+    = Fp.pprint (Fp.subst1 p (vv, Fp.expr (symbol x))) $+$ text "where" $+$
+      nest 2 (vcat (punctuate comma (((\(x,t) -> pretty (symbol x) <> text ":" <> Fp.pprint t) <$> M.toList g))))
 
 instance Pretty Effect where
   pprintPrec z (EffLit s)

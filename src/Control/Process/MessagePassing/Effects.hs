@@ -230,7 +230,7 @@ synthEff g e@(Var x)
 synthEff g eff@(Tick _ e)
   = do (et, p) <- synthEff g e
        reft    <- lookupSortedReft eff
-       liftIO $ putStrLn (printf "tick reft is %s\n" (showpp reft))
+       -- liftIO $ putStrLn (printf "tick reft is %s\n" (showpp reft))
        return (et, p `meetTys` Just reft)
 -- synthEff g e@(App e1 e2)
 --   = undefined -- synthApp g e x
@@ -243,12 +243,14 @@ synthEff g eff@(Tick _ e)
 --             maybe (synthEff g e) freshFnEff eff
 --        else
 --          synthEff g e
-synthEff g e@(App _ (Type _))
-  = do (et, p) <- synthTyApps g e []
+synthEff g e@(App _ (Type ty))
+  = do (et, to) <- synthTyApps g e []
        reft <- lookupSortedReft e
        liftIO $ putStrLn (printf "ty app reft is %s\n" (showpp reft))
-       return (et, p)
+       return (et, inst <$> to)
   where
+    inst :: SpecType -> SpecType
+    inst (RAllT a t) = subsTyVar_meet' (a, ofType ty) t
     skip t
       | isDictTy t     = True
       | isDictLikeTy t = case splitTyConApp_maybe t of
@@ -330,7 +332,7 @@ synthEff g eff@(App eFun eArg)
     maybeSubArg :: Symbol -> Maybe SpecType -> EffTy -> EffTy
     maybeSubArg s (Just t) e
       -- = maybe e (\v -> sub [(s, Info (v,ty,t))] e) $ maybeExtractVar eArg
-      = maybe e (\v -> prefixInfo (Info  v ty t env) $ sub [(s, Info v ty t env)] e) $ maybeExtractVar eArg
+      = maybe e (\v -> prefixInfo (Info  v ty t env) $ sub [(s, Info v ty (top <$> t) env)] e) $ maybeExtractVar eArg
     maybeSubArg _ _ e
       = e
     env = snd <$> g 
@@ -363,9 +365,9 @@ applyRefts ft l xt
 
 meetTys :: Maybe SpecType -> Maybe SpecType -> Maybe SpecType     
 meetTys (Just t) (Just t')
-  = Just (t `strengthen` ofReft r)
+  = Just ((compactReft <$>) <$> (t `strengthen` ofReft r))
   where
-    r = compactReft (rTypeReft t `meet` rTypeReft t')
+    r = rTypeReft t `meet` rTypeReft t'
 meetTys (Just t) t' = Just t
 meetTys _ t'        = t'
 
