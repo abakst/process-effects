@@ -46,8 +46,8 @@ import Language.Haskell.Liquid.GHC.Misc
 import Language.Fixpoint.Types hiding (PPrint(..), SrcSpan(..), ECon) 
 import qualified Language.Fixpoint.Types as Fp
 
-debugUnify = False
-debugApp   = False
+debugUnify = True
+debugApp   = True
 
 debug s x = trace (s ++ ": " ++ show x) x  
 
@@ -319,10 +319,10 @@ synthEff g eff@(App eFun eArg)
        effOut                     <- applySubstM tOut
        liftIO $ putStrLn (printf "app return reft is %s\n" (Fp.showpp reft))
        let effOutSub = maybeSubArg x reft0 $ applyArg x mty Nothing {- reft -} effOut
-       -- liftIO $ putStrLn (printf "apply %s\n\t%s\n\tx:%s\n\ts:%s\n\treft: %s "
-       --                               (printEff (betaReduceTy effOut))
-       --                               (printEff (betaReduceTy $ effOutSub))
-       --                               (symbolString x) (symbolString s) (showpp reft))
+       liftIO $ putStrLn (printf "apply %s\n\t%s\n\tx:%s\n\ts:%s\n\treft: %s "
+                                     (printEff (betaReduceTy effOut))
+                                     (printEff (betaReduceTy $ effOutSub))
+                                     (symbolString x) (symbolString s) (showpp reft))
        -- liftIO $ putStrLn (printf "envout %s\n" (Fp.showpp (assocs (snd <$> g))))
        return (effOutSub, Just reft)
   where
@@ -351,7 +351,7 @@ applyRefts :: Maybe SpecType -> CoreSyn.Expr b -> Maybe SpecType -> Maybe SpecTy
 applyRefts (Just ft) (Lit l) xt
   | (_, _, _, f)        <- bkUniv ft,
     (_, RFun x t t' _)  <- bkClass f
-  = Just $ subst1 t' (x, fromJust $ mkLit l)
+  = Just $ subst1 (substa reintern t') (reintern x, fromJust $ mkLit l)
 applyRefts (Just ft) (Var x') xt
   | (_, _, _, f)        <- bkUniv ft,
     (_, RFun x t t' _)  <- bkClass f
@@ -453,11 +453,12 @@ unifyTermTys tSub eSub f@(EPi s t1 t2) (EPi s' t1' t2')
   = do v                     <- freshTermVar
        (tSub1, eSub1, tyIn)  <- unifyTys tSub eSub (sub [(s,v)] t1) (sub [(s',v)] t1')
        let ap = sub eSub1 . sub tSub1 
-       (tSub2, eSub2, tyOut) <- unifyTys tSub1 eSub1 (ap $ sub [(s,v)] (applyArg v Nothing Nothing t2)) (ap $ sub [(s',v)] (applyArg v Nothing Nothing t2'))
+       (tSub2, eSub2, tyOut) <- unifyTys tSub1 eSub1 (ap $ sub [(s,v)] (applyArg v Nothing Nothing t2))
+                                                     (ap $ sub [(s',v)] (applyArg v Nothing Nothing t2'))
        return (sub eSub2 (sub eSub1 tSub2), eSub2, EPi v tyIn (abstractArg v Nothing tyOut))
 unifyTermTys tSub eSub (ETermAbs s t) (ETermAbs s' t')
   = do e         <- freshEffVar
-       let inst  = [(s, EffVar (Eff e))]
+       let inst  = [(s, EffVar (Eff e)), (s', EffVar (Eff e))]
        (tSub, eSub, t'') <- unifyTys tSub eSub (sub inst t) (sub inst t')
        return (tSub, eSub, ETermAbs e t'')
 unifyTermTys tSub eSub t@(ETermAbs _ _) t'
