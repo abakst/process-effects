@@ -62,7 +62,9 @@ procName :: Symbol -> Doc
 procName s = promela s <> text "proc"
 
 sendDef :: Doc
-sendDef = text "#define send(whom,ty,msg) mbuf[_pid*max_procs + whom]!ty,msg"
+sendDef = text "#define send(whom,ty,msg)" <+>
+          text "assert(whom.p);"           <+>
+          text "mbuf[_pid*max_procs + whom.v]!ty,msg"
 
 recvDef :: Doc
 recvDef = text "#define recv(i,ty,msg) mbuf[i*max_procs + _pid]??ty,msg"
@@ -83,6 +85,30 @@ stackSizeDef = text "#ifndef STACKSZ"    $+$
               text "#define STACKSZ 16" $+$
               text "#endif"
 
+valTypeDef :: Doc
+valTypeDef = text "typedef val {" <+>
+             text "bit" <+> validBit <> semi <+>
+             intType    <+> valueField <> semi <+>
+             text "}" <> semi
+baseVals = vcat [ ptrType <+> v <> semi | v <- [unitVal, trueVal, falseVal] ]
+
+unitVal  = text "unit"
+trueVal  = text "true_val"
+falseVal = text "false_val"
+
+true  = text "true"
+false = text "false"
+
+initializeBaseVals = d_step $
+  assnField validBit    unitVal true <> semi $+$
+  assnField valueField  unitVal true <> semi $+$
+
+  assnField validBit    trueVal true <> semi $+$
+  assnField valueField  trueVal true <> semi $+$
+
+  assnField validBit    falseVal true <> semi $+$
+  assnField valueField  falseVal false <> semi
+
 promelaProgram :: Int -> Effect -> Doc
 promelaProgram n eff
   = maxProcs            $+$
@@ -92,6 +118,8 @@ promelaProgram n eff
     heapSizeDef         $+$
     stackSizeDef        $+$
     mtype               $+$
+    valTypeDef          $+$
+    baseVals            $+$
     types               $+$
     records             $+$
     heaps               $+$
@@ -115,7 +143,7 @@ promelaProgram n eff
     tinfos = [t | t@TypeInfo {} <- allts]
     heaps  = vcat $ goHeap  <$> tinfos
     goHeap ti = heapDecl (tyname ti)
-    pidCtr = ptrType <+> promela pidCtrName
+    pidCtr = intType <+> promela pidCtrName
          <+> equals <+> int 1 <> semi
 
     -- N channels --
@@ -125,7 +153,7 @@ promelaProgram n eff
 bodyTemplate body
   = nest 2 (ret $+$ body)
     where
-      ret = text "byte _ret;"
+      ret = ptrType <+> (promela retVar) <> semi
 
 promelaProcs :: PState -> Doc
 promelaProcs st
@@ -142,15 +170,21 @@ recordTypes PState { rec_funs = recs }
   where
     go (x,f,fs,ls)
       =  text "typedef" <+> actRecordTyName f $+$
-         braces (vcat [ ptrType <+> a <> semi | a <- recs ])
+         braces (vcat (pcField : fields))
       where
-        recs = [pcRecord] ++ (promela . symbol <$> fs)
-                          ++ (promela <$> ls)
+        recs = (promela . symbol <$> fs) ++ (promela <$> ls)
+        pcField = intType <+> pcRecord <> semi
+        fields  = [ ptrType <+> a <> semi | a <- recs ]
 
 initialProc d =
   text "active proctype master() {" $+$
-  bodyTemplate (text "int" <+> promela initialPid <+> text " = 0;" $+$ d) $+$
+  initializeBaseVals $+$
+  bodyTemplate (initDecl $+$ d) $+$
   text "}"
+  where
+    initDecl = ptrType <+> promela initialPid <> semi                           $+$
+               promela initialPid `dot` validBit <+> equals <+> true <> semi    $+$
+               promela initialPid `dot` valueField <+> equals <+> int 0 <> semi
 
 declMtype tinfos
   = text "mtype" <+> braces (hcat $ punctuate comma mtypes)
@@ -167,7 +201,10 @@ chanName :: Fp.Symbol -> Doc
 chanName t = promela t <> text "_chan"
 
 ptrType :: Doc
-ptrType = text "int"
+ptrType = text "val"
+
+intType :: Doc
+intType = text "byte"
 
 objIdType :: Doc
 objIdType = text "byte"
@@ -179,7 +216,7 @@ tableDecl n ti
 heapDecl :: Fp.Symbol -> Doc
 heapDecl ti
   = promela ti <+> heapName ti <> brackets heapSize <> semi $+$
-    ptrType <+> heapPtrName ti <+> equals <+> int 0 <> semi
+    intType <+> heapPtrName ti <+> equals <+> int 0 <> semi
 
 tableName :: TypeInfo -> Doc
 tableName ti = promela (tyname ti) <> text "_table"
@@ -230,9 +267,6 @@ stackPtrName x
 pcRecord :: Doc
 pcRecord = text "_pc"
 
-retRecord :: Doc
-retRecord = text "_ret"
-
 stackName :: Fp.Symbol -> Doc
 stackName x
   = promela x <> text "_stack"
@@ -251,6 +285,10 @@ emptyPState = PState { vars       = [initialPid]
 atomic :: Doc -> Doc
 atomic d
   = text "atomic" <+> braces d
+
+d_step :: Doc -> Doc
+d_step d
+  = text "d_step" <+> braces d
 
 incPidCtr = promela pidCtrName <> text "++" <> semi $+$
             promelaMacro "assert" [ promela pidCtrName <+>
@@ -302,8 +340,15 @@ promelaEffect e = do recCall <- maybeRecursiveCall e
            modify $ \s -> s { vars = validVars (x : vs) }
            return $ fromMaybe empty d $+$ setReturn x $+$ retStack
       where
-        setReturn x = promela retVar <+> equals <+> promela x <> semi
+        setReturn x
+          | symbolString x /= "_"
+          = promela retVar `copyVal` promela x <> semi
+          | otherwise
+          = empty
     go _ e = error (render $ text "promelaEffect:" <+> pretty e)
+
+
+copyVal x y = d_step $ vcat [ copyField f x y <> semi | f <- [validBit, valueField] ]
 
 returnStack :: PM Doc
 returnStack
@@ -326,8 +371,6 @@ formalsList = parens . hcat . punctuate semi . fmap go
     go s = ptrType <+> promela s
 
 validVars = nub . filter (\v -> symbolString v /= "_")
-
-
 
 promelaInfo :: Info -> PM Doc
 promelaInfo i@(Info x ty φ γ) -- yes unicode. sue me.
@@ -395,32 +438,42 @@ promelaAssume i@(Info x ty reft g) (c,ys) e
                then d else text "!" <> parens d
        return $ env $+$ x <+> text "->" <+> braces e'
 promelaAssume (Info x ty reft g) (c,ys) e
-  = do modify $ \s -> s { vars = validVars ys ++ vars s }
+  = do vs <- gets vars
+       modify $ \s -> s { vars = validVars ys ++ vs }
        d <- promelaEffect e
-       return $ assm $+$ nest 2 (braces (decls $+$ d))
+       return $ assm vs $+$ nest 2 (braces (decls vs $+$ d))
   where
     dcname      = symbol (dataConWorkId c)
     tag         = int . ctag $ fromMaybe err (cstrFor dcname ty)
     err         = error $ (printf "*****\nCan't find info for %s\n*****" (symbolString dcname))
-    decls       = vcat (decl <$> (zip [0..] ys))
-    assm        = obj t x <> text ".tag" <+> equals <> equals <+> tag <+> text "->"
-    decl (i, y) = ptrType <+> promela y <+>
-                  equals <+>
-                  obj t x <> (text ".c" <> tag <> brackets (int i)) <> semi
-    t           = tyname (tyInfo ty)
+    decls vs    = vcat (decl vs <$> (zip [0..] ys))
+    assm vs
+      | x `elem` vs
+      = obj t x <> text ".tag" <+> equals <> equals <+> tag <+> text "->"
+      | otherwise
+      = text "/*" <+> promela x <+> vcat (punctuate (text ", ") (promela <$> vs)) <+> text "*/" <+> true
+    decl  vs (i,y)  = ptrType <+> promela y <> semi $+$ unfold vs (i,y)
+    unfold vs (i,y)
+      | x `elem` vs
+      = copyVal (promela y) (obj t x `dot` (text "c" <> tag <> brackets (int i))) <> semi
+      | otherwise
+      = assnField validBit (promela y) false
+    t = tyname (tyInfo ty)
 
 maybeCompare :: Info -> Maybe Doc
 maybeCompare (Info x ty (R.rTypeReft -> reft) g)
   = case extractPropPreds go reft of
-      c:_ -> Just c
+      (xs, c):_ -> Just (ifValid xs c)
       _   -> Nothing
   where
-    go (Fp.PAtom o e1 e2) = do e1' <- go e1
-                               e2' <- go e2
+    ifValid ys c = foldl goValid c ys
+    goValid c y  = c <+> text "||" <+> text "!" <+> promela y `dot` validBit
+    go (Fp.PAtom o e1 e2) = do (xs1, e1') <- go e1
+                               (xs2, e2') <- go e2
                                o'  <- goOp o
-                               return $ parens (e1' <+> o' <+> e2')
-    go (Fp.EVar x)        = Just $ promela x
-    go (Fp.ECon (Fp.I i)) = Just $ int (fromInteger i)
+                               return $ (nub (xs1 ++ xs2), parens (e1' <+> o' <+> e2'))
+    go (Fp.EVar x)        = Just $ ([x], promela x `dot` valueField)
+    go (Fp.ECon (Fp.I i)) = Just $ ([], int (fromInteger i))
     go _ = Nothing
     goOp (Fp.Eq) = Just $ equals <> equals
     goOp (Fp.Ne) = Just $ text "!" <> equals
@@ -442,13 +495,16 @@ promelaNu c e1 e2
                         , procs = (c, args, p) : procs s
                         }
        let decl = if c `notElem` vs then
-                    objIdType <+> promela c <> semi
+                    ptrType <+> promela c <> semi
                   else
                     empty
        return $
          decl $+$
-         atomic (promela c <+> equals <+> promela pidCtrName <> semi $+$
-                 incPidCtr) $+$
+         d_step (
+           promela c `dot` validBit   <+> equals <+> true <> semi $+$
+           promela c `dot` valueField <+> equals <+> promela pidCtrName <> semi $+$
+           incPidCtr
+         ) $+$
          text "run" <+> procName c <> argList args <> semi $+$
          d
 
@@ -485,6 +541,7 @@ promelaRecv :: Fp.Symbol -> (Fp.Symbol, Maybe Type) -> Effect -> PM Doc
 promelaRecv p (x, Just t) e2
   = do n    <- gets proc_limit
        decl <- maybeDecl x
+       modify $ \s -> s { vars = validVars (x : vars s) }
        d    <- promelaEffect e2
        return (decl $+$ recv n <> semi $+$ d)
   where
@@ -553,7 +610,7 @@ promelaRecursive x bdy (fs,as) (AbsEff ret@(Src r _) k) me
                            nest 2 (braces d)
 
            declStack    = (actRecordTyName f) <+> stackName f <> brackets stackSize <> semi
-           declStackPtr = ptrType <+> stackPtrName f <+> equals <+> int 1 <> semi
+           declStackPtr = intType <+> stackPtrName f <+> equals <+> int 1 <> semi
            declLocals   = vcat [ ptrType <+> promela (symbol x) <> semi | x <- locals ]
            declFormals  = vcat [ ptrType <+> promela (symbol f) <> semi | f <- fs ]
 
@@ -586,7 +643,8 @@ promelaRecursive x bdy (fs,as) (AbsEff ret@(Src r _) k) me
 
 promelaMaybeDecl x y
   = if symbolString x /= "_" then
-      ptrType <+> promela x <+> equals <+> promela y <> semi
+      ptrType <+> promela x <> semi $+$
+      copyVal (promela x) (promela y) <> semi
     else
       empty
 
@@ -614,14 +672,13 @@ promelaRecursiveCall xf f forms ls as
              stackPtrName f <> text "++" <> semi $+$
              saveLocals f ls (symbol <$> forms) args l <> semi $+$
              push <> semi
-           restore = promela ret <+> equals <+> promela retVar <> semi
            push    = snd $ pushArgs vs f ls (symbol <$> forms) args l
-       modify $ \s -> s { vars = validVars (ret : vs) }
+       modify $ \s -> s { vars = maybe vs (validVars . (:vs)) ret }
        d <- promelaEffect k
-       modify $ \s -> s { vars = validVars (ret : vs)
+       modify $ \s -> s { vars = maybe vs (validVars . (:vs)) ret
                         , rec_stack = (xf,f,l,restore $+$ d):rec_stack s
                         }
-       return (atomic place)
+       return (d_step place)
   where
     args = take (length as - 2) as
     kont = head $ drop (length as - 2) (trace (printf "***kont*** %s" (render $ pretty as)) as)
@@ -633,36 +690,53 @@ promelaRecursiveCall xf f forms ls as
     -- (AbsEff (Src x t) k)        = case kont of
     --                                 AbsEff (Src x t) k -> kont
     --                                 _ -> tracepp "kont was actually" kont
-    ret = maybe (symbol "_") (\(x,t) -> maybe (symbol "_") (const x) t) xt
+    ret = do (x,to) <- xt
+             ty     <- to
+             return x
+    restore = maybe empty goRestore ret
+    goRestore r
+      | symbolString r /= "_"
+      = copyVal (promela r) (promela retVar) <> semi
+      | otherwise
+      = empty
+    -- ret = maybe Nothing (\(x,t) -> maybe Nothing (Just . const x) t) xt
 
 stackFrame f = stackName f <> brackets (stackPtrName f <+> text "-" <+> int 1)
 oldStackFrame f = stackName f <> brackets (stackPtrName f <+> text "-" <+> int 2)
 
 popActivationRecord f ls forms
-  = ptrType <+> pcRecord <+> equals <+> frame <> text "." <> pcRecord <> semi $+$
-    assignLocals $+$
-    assignArgs
+  = intType <+> pcRecord <> semi $+$
+    (d_step $
+       pcRecord <+> equals <+> frame <> text "." <> pcRecord <> semi $+$
+       assignLocals $+$
+       assignArgs)
   where
     frame      = stackFrame f
-    assignArgs = vcat [ promela x <+> equals <+> frame <> text "." <> promela x <> semi
+    assignArgs = vcat [ copyVal (promela x) (frame `dot` promela x) <> semi
                       | x <- forms
                       ]
-    assignLocals = vcat [ promela x <+> equals <+> frame <> text "." <> promela x <> semi
+    assignLocals = vcat [ copyVal (promela x) (frame `dot` promela x) <> semi
                         | x <- ls
                         ]
 
+assnField f x y = x `dot` f <+> equals <+> y
+copyField f x y = assnField f x (y `dot` f)
+
 saveLocals :: Fp.Symbol -> [Fp.Symbol] -> [Fp.Symbol] -> [Effect] -> Int -> Doc
 saveLocals f ls forms args pc
-  = saveLocals $+$
-    saveArgs   $+$
-    savePC
+  = d_step $
+      saveLocals $+$
+      saveArgs   $+$
+      savePC
   where
     oldName    = oldStackFrame f
     savePC     = oldName <> text "." <> pcRecord <+> equals <+> int pc <> semi
-    saveArgs   = vcat [ oldName <> text "." <> promela f <+> equals <+> promela f <> semi
-                      | f <- forms ]
-    saveLocals = vcat [ oldName <> text "." <> promela l <+> equals <+> promela l <> semi
-                      | l <- ls ]
+    saveArgs   = vcat [ copyVal (oldName `dot` promela f) (promela f) <> semi
+                      | f <- forms
+                      ]
+    saveLocals = vcat [ copyVal (oldName `dot` promela l) (promela l) <> semi
+                      | l <- ls
+                      ]
 
 pushArgs :: [Fp.Symbol]
          -> Fp.Symbol
@@ -682,9 +756,9 @@ pushArgs env f ls forms args pc
     newPC      = name <> text "." <> pcRecord <+> equals <+> int 0 <> semi
     mds        = [ (x,md) | (x,_,md) <- promelaVal env <$> args ]
     argDecls   = vcat . catMaybes $ (snd <$> mds)
-    newArgs    = vcat [ name <> text "." <> promela f <+> equals <+> promela x <> semi
-                      | (f,x) <- zip forms (fst <$> mds) ]
-
+    newArgs    = vcat [ copyVal (name `dot` promela f) (promela x) <> semi
+                      | (f,x) <- zip forms (fst <$> mds)
+                      ]
 
 newLabel :: Fp.Symbol -> PM Int
 newLabel f
@@ -701,13 +775,13 @@ unwrapRecursiveCont e = error (printf "unwrap: %s\n" (render $ pretty e))
 promelaVal :: [Fp.Symbol] -> Effect -> (Fp.Symbol, Type, Maybe Doc)
 promelaVal env (EffVar (Src x _))
   | x == Fp.symbol (dataConWorkId unitDataCon)
-  = (symbol "true", unitTy, Nothing)
+  = (symbol "unit", unitTy, Nothing)
 promelaVal env (EffVar (Src x _))
   | symbolString x == (symbolString $ Fp.symbol (dataConWorkId trueDataCon))
-  = (symbol "true", unitTy, Nothing)
+  = (symbol "true_val", unitTy, Nothing)
 promelaVal env (EffVar (Src x _))
   | symbolString x == (symbolString $ Fp.symbol (dataConWorkId falseDataCon))
-  = (symbol "false", unitTy, Nothing)
+  = (symbol "false_val", unitTy, Nothing)
 promelaVal env (EffVar (Src x Nothing)) -- Variable lookup
   = (x, error (printf "uh oh needed a type %s" (Fp.symbolString x)), Nothing)
 promelaVal env (EffVar (Src x (Just t))) -- Variable lookup
@@ -748,7 +822,7 @@ tmpName n = n <> text "_tmp"
 
 obj :: Fp.Symbol -> Fp.Symbol -> Doc
 obj ty idx
-  = heapName ty <> brackets (promela idx)
+  = heapName ty <> brackets (promela idx `dot` valueField)
 
 access :: Fp.Symbol -> Fp.Symbol -> Fp.Symbol -> Doc
 access ty idx fld
@@ -764,24 +838,51 @@ promelaVar x
 maybeInfoVal :: [Fp.Symbol] -> Fp.Symbol -> Info -> Maybe Doc
 maybeInfoVal env x (maybeCstrApp -> Just (cinfo, args))
   = Just $ maybeDecl $+$
-           atomic (
-             promela x <+> equals <+> heapPtrName tyname <> semi $+$
+           d_step (
+             setValidBit x (text "true") <> semi $+$
+             promela x `dot` valueField <+> equals <+> heapPtrName tyname <> semi $+$
              heapPtrName tyname <> text "++" <> semi $+$
              access tyname x (symbol "tag") <+> equals <+> int (ctag cinfo) <> semi $+$
              vcat (go <$> (zip [0..] args))
            )
   where
     maybeDecl = if x `elem` env then empty else ptrType <+> promela x <> semi
-    go (i,Fp.EVar a) = obj tyname x <> cstr <> brackets (int i)
-                       <+> equals <+> promela a <> semi $+$ empty
+    go (i,Fp.EVar a)
+      = copyVal (obj tyname x <> cstr <> brackets (int i)) (promela a) <> semi $+$ empty
     cstr = text ".c" <> int (ctag cinfo)
     tyname = ctype cinfo
 maybeInfoVal env x (maybeInt -> Just i)
-  = Just $ maybeDeclDoc env x (int i) <> semi
-maybeInfoVal env x (maybeExpr -> Just e)
-  = Just $ maybeDeclDoc env x e <> semi
+  = Just $ defineConcrete env [] x (int i) <> semi
+    -- maybeDeclDoc env x (int i) <> semi
+maybeInfoVal env x (maybeExpr -> Just (xs, e))
+  -- = Just $ maybeDeclDoc env x e <> semi
+  = Just $ defineConcrete env xs x e <> semi
 maybeInfoVal env x _
   = Nothing
+
+defineConcrete :: [Fp.Symbol] -> [Fp.Symbol] -> Fp.Symbol -> Doc -> Doc
+defineConcrete env deps x d
+  = decl_x $+$
+    d_step (x_valid deps $+$ lval <+> equals <+> rval)
+  where
+    decl_x
+      | x `elem` env
+      = empty
+      | otherwise
+      = ptrType <+> promela x <> semi
+    x_valid [] = promela x `dot` validBit <+> equals <+> text "true" <> semi
+    x_valid (d:ds)
+      = promela x `dot` validBit <+> equals <+>
+        foldl go (promela d `dot` validBit) ds <> semi
+    go x y = x <+> text "&&" <+> promela y `dot` validBit
+    lval = promela x `dot` valueField
+    rval = d
+
+dot x y = x <> text "." <> y
+validBit   = text "p"
+valueField = text "v"
+setValidBit x e = promela x `dot` validBit <+> equals <+> e
+
 
 maybeDeclDoc :: [Fp.Symbol] -> Fp.Symbol -> Doc -> Doc
 maybeDeclDoc env x def
@@ -801,7 +902,9 @@ propPreds :: Fp.Reft -> [Fp.Expr]
 propPreds (Fp.Reft (vv,e))
   = [ e' | (Fp.PIff x e') <- Fp.conjuncts e, x == Fp.eProp vv ]
 
-extractPreds :: (Fp.Expr -> Maybe a) -> Fp.Reft -> [a]
+extractPreds :: (Fp.Expr -> Maybe ([Fp.Symbol], a))
+             -> Fp.Reft
+             -> [([Fp.Symbol], a)]
 extractPreds f e
   = catMaybes (f <$> eqpreds e)
 
@@ -809,20 +912,20 @@ extractPropPreds :: (Fp.Expr -> Maybe a) -> Fp.Reft -> [a]
 extractPropPreds f e
   = catMaybes (f <$> propPreds e)
 
-maybeExpr :: Info -> Maybe Doc
+maybeExpr :: Info -> Maybe ([Fp.Symbol], Doc)
 maybeExpr (Info x ty reft g)
   = case extractPreds go (R.rTypeReft reft) of
       c:_ -> Just c
       _    -> Nothing
   where
     go (Fp.EBin op e1 e2)
-      = do d1 <- go e1
-           d2 <- go e2
+      = do (syms1, d1) <- go e1
+           (syms2, d2) <- go e2
            o  <- goOp op
-           return $ parens (d1 <+> o <+> d2)
-    go (Fp.EVar x)   = Just $ promela x
+           return $ (nub (syms1 ++ syms2), parens (d1 <+> o <+> d2))
+    go (Fp.EVar x)   = Just $ ([x], promela x `dot` valueField)
     go (Fp.ECst e _) = go e
-    go (Fp.ECon (Fp.I i)) = Just (int (fromInteger i))
+    go (Fp.ECon (Fp.I i)) = Just ([], int (fromInteger i))
     go _ = Nothing
     goOp Fp.Plus  = Just $ text "+"
     goOp Fp.Minus = Just $ text "-"
@@ -830,25 +933,25 @@ maybeExpr (Info x ty reft g)
 maybeInt :: Info -> Maybe Int
 maybeInt (Info x ty reft g)
   = case extractPreds go (R.rTypeReft reft) of
-      c:_ -> Just c
+      (_,c):_ -> Just c
       _   -> Nothing
   where
     go (Fp.ECst e _)      = go e
-    go (Fp.ECon (Fp.I i)) = return (fromInteger i)
+    go (Fp.ECon (Fp.I i)) = return ([], fromInteger i)
     go _ = Nothing
 maybeCstrApp :: Info -> Maybe (CstrInfo, [Fp.Expr])
 maybeCstrApp (Info x ty reft g)
   = case extractPreds go (R.rTypeReft reft) of
-      c:_ -> Just c
+      c:_ -> Just (snd c)
       _   -> Nothing
   where
     go (Fp.EVar f) =
       case cstrFor f ty of
-        Just cinfo -> Just (cinfo, [])
+        Just cinfo -> Just ([], (cinfo, []))
         _          -> Nothing
     go (Fp.splitEApp -> (Fp.EVar f, as)) =
       case cstrFor f ty of
-        Just cinfo -> Just (cinfo, as)
+        Just cinfo -> Just ([], (cinfo, as))
         _          -> Nothing
     go _ = Nothing
 
@@ -915,7 +1018,7 @@ declareType ty@TypeInfo{}
   where
     name  = promela (tyname ty)
     body  = vcat ( text "int tag;" : (go <$> cinfo ty) )
-    go ci = objIdType <+> text "c" <> int (ctag ci) <> brackets (int (max 1 (length (cargs ci)))) <> semi
+    go ci = ptrType <+> text "c" <> int (ctag ci) <> brackets (int (max 1 (length (cargs ci)))) <> semi
 argName :: Fp.Symbol -> Int -> Doc
 argName s i = text "arg_" <> int i
 

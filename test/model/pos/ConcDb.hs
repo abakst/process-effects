@@ -13,9 +13,23 @@ data DBAPI = Alloc Int Pid
 
 instance RecvMsg DBAPI
 {-@ invariant {v:DBAPI | validMsg v} @-}
+{-@ invariant {v:Int   | validMsg v} @-}
 
 data KeyValue = KV Int Int KeyValue
               | Null
+
+main :: Process ()
+main = do me <- getSelfPid
+          spawn (client me)
+          dataBase Null
+
+client :: Pid -> Process ()
+client p = do me <- getSelfPid
+              send p (Alloc 0 me)
+              msg <- recv
+              case msg of
+                Free      -> send p (0 :: Int)
+                Allocated -> return ()
 
 dataBase :: KeyValue -> Process ()
 dataBase state
@@ -28,6 +42,9 @@ dataBase state
     handleAlloc k p
       = case lookupKey k state of
           Nothing -> do send p Free
+                        v <- recv
+                        dataBase (KV k v state)
+          Just v  -> do send p Allocated
                         dataBase state
 
     handleLookup :: Int -> Pid -> Process ()
