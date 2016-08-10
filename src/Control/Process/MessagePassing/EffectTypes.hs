@@ -25,6 +25,7 @@ module Control.Process.MessagePassing.EffectTypes (
   , occurs
   , localVars
   , fst3, snd3, thd3
+  , viewEff
   ) where
 
 import Debug.Trace
@@ -90,6 +91,11 @@ data EffState = EffState {
   , esubst   :: [(Symbol, Effect)]
   , target   :: ModuleName
   }
+
+viewEff :: Effect -> Effect
+viewEff (Pend e i) = viewEff e              
+viewEff e          = e
+                     
 type EffectM a = StateT EffState IO a
 
 freshInt :: EffectM Int

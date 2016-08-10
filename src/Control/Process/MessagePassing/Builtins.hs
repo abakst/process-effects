@@ -25,6 +25,7 @@ returnEffect :: [Type] -> Symbol -> EffTy
 returnEffect [_,a] x
   = EPi x noEff
   $ EffTerm (AbsEff (Src x t) (effBindF (AppEff (EffVar kont) (EffVar (Src x t)))))
+  -- $ EffTerm (AbsEff (Src x t) (effBindF (AppEff (AppEff (EffVar kont) (EffVar (Src x t))) (EffVar me))))
   where
     t = Just a
 
@@ -35,10 +36,25 @@ bindEffect [_,a,b] x
              $ EPi actSym (EffTerm (EffVar (Eff e0Sym)))
              $ EPi fSym
                  (EPi xSym noEff
-                        (EffTerm (absEff (Src actSym Nothing) (EffVar (Eff e1Sym)))))
+                        (EffTerm (absEff (Src actSym Nothing)
+                                 (absEff (Src xSym Nothing)
+                                 (AppEff (EffVar (Eff e1Sym)) (EffVar (Src xSym Nothing)))))))
                  (EffTerm (absEff (Src actSym Nothing)
                           (absEff (Src fSym Nothing)
                           (effBindF
+                           -- (AppEff (AppEff (EffVar (Eff e0Sym))
+                           --          (AbsEff (Src (symbol x) tya)
+                           --            (AppEff (AppEff (EffVar (Eff e1Sym)) (EffVar kont))
+                           --                    (EffVar me))))
+                           --  (EffVar me))))))
+
+                           -- (AppEff (AppEff (EffVar (Eff e0Sym))
+                           --          ((AppEff (AppEff (EffVar (Eff e1Sym))
+                           --                            (EffVar kont)))
+                           --                    (EffVar me)))
+                           --  (EffVar me))))))
+
+
                            (AppEff (AppEff (EffVar (Eff e0Sym))
                                     (AbsEff (Src (symbol x) tya)
                                       (AppEff (AppEff (AppEff (EffVar (Eff e1Sym))
