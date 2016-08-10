@@ -47,8 +47,8 @@ import Language.Haskell.Liquid.GHC.Misc
 import Language.Fixpoint.Types hiding (PPrint(..), SrcSpan(..), ECon) 
 import qualified Language.Fixpoint.Types as Fp
 
-debugUnify = True
-debugApp   = True
+debugUnify = False
+debugApp   = False
 
 debug s x = trace (s ++ ": " ++ show x) x  
 
@@ -250,12 +250,11 @@ synthEff g eff@(Tick _ e)
 synthEff g e@(App _ (Type ty))
   = do (et, to) <- synthTyApps g e []
        reft <- lookupSortedReft e
-       liftIO $ putStrLn (printf "ty app reft is %s\n" (showpp reft))
        return (et, inst <$> to)
   where
     inst :: SpecType -> SpecType
     inst (RAllT a t) = subsTyVar_meet' (a, ofType ty) t
-    inst  t          = error (printf "inst: %s" (Fp.showpp t))
+    inst t           = error (printf "inst: %s %s" (Fp.showpp ty) (Fp.showpp t))
     skip t
       | isDictTy t     = True
       | isDictLikeTy t = case splitTyConApp_maybe t of

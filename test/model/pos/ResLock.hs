@@ -27,6 +27,7 @@ main = do me <- getSelfPid
 resServer :: Process ()
 resServer = resLoop Unlocked
   where
+    resLoop :: ResState -> Process ()
     resLoop Unlocked
       = do lock <- recv
            case lock of
