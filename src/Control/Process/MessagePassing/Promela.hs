@@ -798,15 +798,21 @@ promelaVal env (Pend e (Info  x t _ g))
   = promelaVal env (EffVar (Src x (Just t)))
 promelaVal env e = error (printf "\n\n*****promelaVal:\n%s\n******\n\n" (render (pretty e)))
 
+havoc :: Symbol -> Type -> (Symbol, Type, Maybe Doc)
 havoc x t
   | tyName t == pidType
   = (x, t, Just declX)
   | otherwise
-  = (x, t, Nothing)
+  = (x, t, Just (topVal x))
   where
     declX = ptrType <+> promela x <> semi $+$
             text "select" <> parens (promela x <+> colon <+> int 0 <+> text ".." <+> promela maxProcsVar) <> semi $+$
             promelaMacro "assume" [promela x <+> text "<" <+> promela pidCtrName]
+
+topVal :: Fp.Symbol -> Doc
+topVal x
+  = ptrType <+> promela x <> semi $+$
+    assnField validBit (promela x) false <> semi
 
 promelaCstrVal :: CstrInfo -> [Fp.Expr] -> Doc
 promelaCstrVal c args
